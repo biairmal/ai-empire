@@ -152,8 +152,10 @@ The Control Plane is the authoritative orchestration system.
 
 It owns:
 
+* clients
 * projects
 * project configuration
+* project repositories
 * workflows
 * tasks
 * task dependencies
@@ -356,6 +358,171 @@ Client project
 Policies determine which operations require approval.
 
 Approval behavior should therefore be configurable rather than hardcoded into workers.
+
+---
+
+# 11A. Multi-Repository Projects
+
+A project represents a **product**, not a single Git repository. A project may belong to a client (see §11B).
+
+A project may consist of multiple repositories.
+
+Example:
+
+```text
+Project: guest-management
+ ├── Repository: backend    (Go,   go test ./...)
+ └── Repository: frontend   (Node, npm test)
+
+Project: go-sdk
+ └── Repository: go-sdk     (Go,   go test ./...)
+```
+
+### Repository
+
+Each repository belongs to exactly one project and defines:
+
+* name (unique within the project)
+* remote URL
+* default (protected) branch
+* technology stack
+* test command
+
+The worker must be able to push to the remote. A local non-bare repository with the default branch checked out is not a valid remote.
+
+### Tasks
+
+* Every task targets **exactly one repository**.
+* A feature that spans repositories is split into one task per repository, ordered with task dependencies.
+
+```text
+backend: add QR validation endpoint
+      ↓ depends_on
+frontend: add QR scanner screen
+```
+
+* The merge approval gate is per repository, and the approval request must state which repository and branch it covers.
+
+### Knowledge
+
+* **Project knowledge** (PRD, architecture, API specifications, decisions) is shared by all repositories of the project.
+* **Stack knowledge** is selected by the task's repository, not by the project.
+  A frontend task receives Node knowledge, never Go knowledge, even when the project also contains a Go backend.
+
+```text
+Global knowledge
+      ↓
+Stack knowledge   ← from the task's repository
+      ↓
+Project knowledge ← shared by all repositories in the project
+      ↓
+Task context
+```
+
+### Isolation
+
+* Workspaces are isolated per repository and per task.
+* An agent works only inside the worktree of its task's repository.
+  Other repositories of the same project are not available to it unless explicitly provided as read-only context.
+* Worker capability matching uses the repository's stack by default.
+
+### Shared libraries
+
+A library reused by multiple projects (for example, a Go SDK) should be its own project.
+
+A repository must not belong to multiple projects.
+
+### Decisions
+
+**Cross-project task dependencies are allowed**, as ordering only.
+
+```text
+go-sdk:                     add QR token helper
+      ↓ depends_on
+guest-management/backend:   use helper in validation endpoint
+      ↓ depends_on
+guest-management/frontend:  add scanner screen
+```
+
+* A dependency only delays when a task may start. It never shares knowledge, context, or files between the projects.
+* Both projects must belong to the **same client**, or both must have no client. A dependency must never link two different clients' work.
+
+**One merge gate per repository.**
+
+* Each repository's change is approved on its own, which keeps every review small.
+* Dependencies provide the ordering: a dependent task starts only after the tasks it depends on are merged, so an approved change never relies on unmerged work.
+* A combined all-or-nothing approval for a multi-repository feature is out of scope for now. Revisit it when workflows group tasks into features (V3).
+
+---
+
+# 11B. Clients
+
+A client is the organization or person the work is done for.
+
+The client is the **confidentiality boundary**: knowledge from one client must never reach another client's work.
+
+```text
+Client: acme
+ ├── Project: acme-shop
+ │    ├── Repository: backend
+ │    └── Repository: frontend
+ └── Project: acme-admin
+      └── Repository: admin
+
+Client: (none)            ← personal projects
+ └── Project: go-sdk
+      └── Repository: go-sdk
+```
+
+### Client
+
+A client defines:
+
+* slug and name
+* default autonomy level for new projects (client work is typically conservative)
+
+A project belongs to **at most one** client. Personal and internal projects have no client.
+
+### Client knowledge
+
+Knowledge that belongs to the client rather than to a single project is stored once, at client scope.
+
+Examples:
+
+* coding conventions and review expectations
+* branding and UI guidelines
+* compliance rules (data residency, PII handling)
+* infrastructure landscape (cloud accounts, CI, deployment targets), by name only and never secrets
+* domain vocabulary and shared business rules
+
+Client knowledge is shared by all projects of that client, and by no other project.
+
+### Knowledge scopes
+
+Stack and client are **independent** scopes:
+
+* the stack is selected by the task's repository
+* the client is selected by the task's project
+
+```text
+Global
+  ├── Stack    ← task's repository
+  └── Client   ← task's project (optional)
+        └── Project
+              └── Task context
+```
+
+Repository-specific knowledge lives inside the repository itself (README, CLAUDE.md, docs/). The platform does not keep a separate repository knowledge scope.
+
+### Isolation rules
+
+* A project never receives another client's knowledge.
+* A project without a client never receives any client knowledge.
+* Moving a project to a different client is an explicit, audited owner action.
+
+### Future use
+
+Clients are the natural grouping for cost tracking, reporting, and per-client policies.
 
 ---
 
@@ -665,13 +832,13 @@ The underlying Markdown repository must remain usable without Obsidian.
 Knowledge must be isolated by scope.
 
 ```text
-GLOBAL ENGINEERING KNOWLEDGE
-          ↓
-TECH STACK KNOWLEDGE
-          ↓
-PROJECT KNOWLEDGE
-          ↓
-FEATURE / TASK CONTEXT
+         GLOBAL ENGINEERING KNOWLEDGE
+            ↓                    ↓
+TECH STACK KNOWLEDGE      CLIENT KNOWLEDGE (optional, §11B)
+ (from the repository)          ↓
+            ↓             PROJECT KNOWLEDGE
+            ↓                    ↓
+            └──► FEATURE / TASK CONTEXT ◄──┘
 ```
 
 Information flows downward.
@@ -703,6 +870,8 @@ Project B
 ```
 
 Project A must not automatically leak knowledge into Project B.
+
+Client A's knowledge must never appear in Client B's projects.
 
 Go knowledge must not automatically appear in .NET tasks.
 
@@ -985,7 +1154,9 @@ Different systems have different responsibilities.
 Source of truth for:
 
 ```text
+clients
 projects
+repositories
 tasks
 workflows
 workers
@@ -1329,6 +1500,8 @@ PostgreSQL
 Redis
 Git integration
 Project isolation
+Clients
+Multi-repository projects
 Task management
 Basic workflow engine
 Approval gates

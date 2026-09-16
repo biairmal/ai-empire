@@ -119,6 +119,53 @@ Derived from [AI_SOFTWARE_DEV_EMPIRE.md](AI_SOFTWARE_DEV_EMPIRE.md). `§N` point
 
 **Done when (V1 goal):** `empire task create "add /health endpoint"` → the worker implements it, tests pass, a merge approval appears → you approve → the change is merged. Full trail in `audit_log`.
 
+### M1.8 Clients & multi-repository projects (§11A, §11B)
+Client → projects → repositories. A client (optional) is the confidentiality boundary. A project is a product (e.g. Guest Management), and its repositories are backend/frontend.
+
+**Data model**
+- [ ] Migration `000003`: `clients` (id, slug UNIQUE, name, default_autonomy_level, created_at)
+- [ ] `projects.client_id` FK, nullable (NULL = personal/internal project)
+- [ ] `repositories` (id, project_id FK, name, repo_url, default_branch, stack, test_command, created_at), `UNIQUE (project_id, name)`
+- [ ] Backfill: one repository per existing project from its current repo columns, named after the project slug
+- [ ] `tasks.repository_id` FK (NOT NULL after backfill), and it must belong to the task's project
+- [ ] Drop `repo_url`, `default_branch`, `stack`, `test_command` from `projects` (they move to `repositories`). `autonomy_level` stays per project
+
+**API & CLI**
+- [ ] `POST /clients`, `GET /clients[/{id}]` (owner), audited
+- [ ] `POST /projects` takes an optional `client` (slug). A new project inherits the client's default autonomy unless one is given
+- [ ] `POST /projects/{id}/client` to move a project to another client or to none (owner only, audited, explicit)
+- [ ] `POST /projects/{id}/repositories`, `GET /projects/{id}/repositories` (owner), audited
+- [ ] `POST /tasks` takes `repository` (name). Required when the project has more than one repo; defaults to the only one otherwise
+- [ ] Task `required_capabilities` defaults to the repository's stack
+- [ ] Claim returns `{task, project, repository}`
+- [ ] Merge approval summary names the repository: `Merge ai/task-N into backend:main`
+- [ ] CLI: `empire client create -slug -name [-autonomy]`, `empire client list`, `empire project create -slug -name [-client C] [-autonomy]`, `empire project move P -client C|-none`, `empire repo add -project P -name N -repo URL -stack S [-branch] [-test]`, `empire repo list -project P`, `empire task create -project P -repo N …`
+- [ ] Project list shows the client; task list shows the repository
+
+**Worker & context**
+- [ ] Workspace layout: `workspaces/<project>/<repo>/_base` and `workspaces/<project>/<repo>/task-N`
+- [ ] The worker clones, tests, pushes, and merges using the repository's settings
+- [ ] Context resolver, in load order: `global/` → `stacks/<repository stack>/` → `clients/<project's client>/` (only if the project has a client) → the task's docs from `projects/<project slug>/`
+- [ ] Hard rule, with a test: never another client's folder, and no client folder at all for client-less projects
+- [ ] Knowledge folders stay flat: `knowledge/clients/<slug>/` next to `knowledge/projects/<slug>/`, so moving a project between clients never moves files
+- [ ] Add `knowledge/clients/README.md` and `knowledge/stacks/node/` (placeholder READMEs)
+- [ ] Update [knowledge/contracts/frontmatter.md](knowledge/contracts/frontmatter.md): add a `clients/<slug>/` → `client: <slug>` scope, and add client to the allowed-reference order (project → client → stack → global)
+- [ ] No repository knowledge scope: repo-specific knowledge stays in the repo (README, CLAUDE.md, docs/)
+
+**Dependencies & gates (decided in §11A)**
+- [ ] Allow cross-project `depends_on`, as ordering only. Both projects must have the same client, or both have none; otherwise → 400
+- [ ] Cross-project dependencies never add the other project's knowledge to context. Test it
+- [x] One merge gate per repository (already how it works). *(defer)* combined multi-repo approval until V3 workflows group tasks into features
+
+**Tests & docs**
+- [ ] E2E: one project with two repos (different stacks). A task in each repo merges only into its own repo, and the frontend task's context has no Go stack files
+- [ ] Unit test: two clients. A project of client A gets A's client knowledge and never B's; a client-less project gets none
+- [ ] Update [docs/database.md](docs/database.md), [docs/apps.md](docs/apps.md), [docs/README.md](docs/README.md)
+
+**Prerequisite:** every repo needs a pushable remote. Create the GitHub repo for `guest-management-fe` before registering it.
+
+**Done when:** project `guest-management` has `backend` (go) and `frontend` (node) repos, and `go-sdk` is its own project (client-less, or both under a client if Guest Management is client work). A chain of go-sdk task → backend task → frontend task runs in order, and each goes through its own merge gate. A task in a client project loads that client's knowledge. A backend task and a frontend task (the frontend one `-after` the backend one) each go through the merge gate and land on their own repo's `main`.
+
 ---
 
 ## V2 — Persistent AI Interface (§41)
@@ -220,7 +267,7 @@ Do these in order of real pain, not in list order.
 - [ ] **Multiple workers:** concurrency limits per worker/project; re-evaluate Redis here
 - [ ] **Docker-per-task sandboxes:** filesystem and network boundaries, secrets injected per task (§34)
 - [ ] **Multiple models + routing (§32):** add a second `Agent` implementation; route by a simple rule table (task type → model)
-- [ ] **Cost tracking & budgets:** per-project token/cost totals, and budget caps that pause work
+- [ ] **Cost tracking & budgets:** per-client and per-project token/cost totals, and budget caps that pause work
 - [ ] **Advanced scheduling:** priorities, dependency-aware ordering, fair share across projects
 - [ ] **Learning system (§23):** `learning_candidates` table → human review → promote to `stacks/` or `global/` (always gated)
 - [ ] **Observability (§36):** a small web dashboard, or Grafana over Postgres; failures, retries, durations, costs
@@ -257,6 +304,7 @@ Do these in order of real pain, not in list order.
 | M1.1–1.3 | Data, API, approvals | Task moves through states; gate blocks until approved |
 | M1.4–1.6 | Git, context, worker | Crash-safe worker in isolated worktrees |
 | M1.7 | Coding agent | **V1: task → code → tests → merge approval** |
+| M1.8 | Clients & multi-repo projects | Client → projects → repos; client knowledge isolated per client |
 | M2 | Hermes + notifications | **V2: run it all from your phone** |
 | M3.1–3.4 | Contracts, validation, workflows | **PRD → design → tasks pipeline with gates** |
 | M3.5–3.8 | Roles, graph, impact | **V3: traceability + impact analysis** |
