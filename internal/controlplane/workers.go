@@ -314,9 +314,9 @@ func (s *Server) finishRun(r *http.Request, a actor) (any, error) {
 	return nil, s.tx(r.Context(), func(tx pgx.Tx) error {
 		var taskID int64
 		err := tx.QueryRow(r.Context(), `
-			UPDATE agent_runs SET finished_at = now(), exit_status = $3, log_path = $4, tokens = $5, cost_usd = $6
+			UPDATE agent_runs SET finished_at = now(), exit_status = $3, log_path = $4, tokens = $5, cost_usd = $6, summary = $7
 			WHERE id = $1 AND worker_id = $2 AND finished_at IS NULL
-			RETURNING task_id`, id, a.workerID, in.ExitStatus, in.LogPath, in.Tokens, in.CostUSD).Scan(&taskID)
+			RETURNING task_id`, id, a.workerID, in.ExitStatus, in.LogPath, in.Tokens, in.CostUSD, in.Summary).Scan(&taskID)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return errf(http.StatusConflict, "run %d is not an open run of %s", id, a)
 		}

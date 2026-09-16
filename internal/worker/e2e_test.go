@@ -282,6 +282,13 @@ func TestClientsAndRepositories(t *testing.T) {
 		if len(pending) != 1 || pending[0].SubjectRef != strconv.FormatInt(tk.task.ID, 10) || !strings.Contains(pending[0].Summary, tk.gateFor) {
 			t.Fatalf("pending approvals = %+v, want one for task %d into %s", pending, tk.task.ID, tk.gateFor)
 		}
+		// M1.9: the human sees what the agent says it did.
+		if !strings.Contains(pending[0].Summary, "Agent summary:\nfake agent wrote:") {
+			t.Errorf("approval summary lacks agent summary:\n%s", pending[0].Summary)
+		}
+		if runs := taskDetail(t, owner, tk.task.ID).Runs; len(runs) != 1 || !strings.HasPrefix(runs[0].Summary, "fake agent wrote:") {
+			t.Errorf("run summary = %+v", runs)
+		}
 		do(t, owner, "POST", "/approvals/"+strconv.FormatInt(pending[0].ID, 10)+"/approve", api.Decision{}, nil)
 		step(t, w, true) // merge
 		if s := taskDetail(t, owner, tk.task.ID).Task.Status; s != task.Completed {
@@ -330,6 +337,41 @@ func TestClientsAndRepositories(t *testing.T) {
 	}
 	if moves != 2 {
 		t.Errorf("project.move_client audit rows = %d, want 2", moves)
+	}
+
+	// M1.9: edit projects and repositories, audited with before/after.
+	str := func(s string) *string { return &s }
+	var p api.Project
+	do(t, owner, "PATCH", "/projects/other", api.UpdateProject{AutonomyLevel: str("medium")}, &p)
+	if p.AutonomyLevel != "medium" || p.Name != "Other" {
+		t.Errorf("project after update = %+v", p)
+	}
+	expectStatus(t, owner, "PATCH", "/projects/other", api.UpdateProject{AutonomyLevel: str("reckless")}, 400)
+	expectStatus(t, owner, "PATCH", "/projects/other", api.UpdateProject{Name: str("")}, 400)
+
+	var rp api.Repository
+	do(t, owner, "PATCH", "/projects/guest/repositories/backend", api.UpdateRepository{TestCommand: str("")}, &rp)
+	if rp.TestCommand != "" || rp.Stack != "go" || rp.RepoURL != beGit {
+		t.Errorf("repository after update = %+v", rp)
+	}
+	do(t, owner, "PATCH", "/projects/guest/repositories/backend", api.UpdateRepository{DefaultBranch: str("develop")}, &rp)
+	if rp.DefaultBranch != "develop" || rp.TestCommand != "" {
+		t.Errorf("repository after second update = %+v", rp)
+	}
+	expectStatus(t, owner, "PATCH", "/projects/guest/repositories/backend", api.UpdateRepository{Stack: str("")}, 400)
+	expectStatus(t, owner, "PATCH", "/projects/guest/repositories/nope", api.UpdateRepository{Stack: str("go")}, 404)
+	expectStatus(t, client.New(hs.URL, "worker-t"), "PATCH", "/projects/guest", api.UpdateProject{AutonomyLevel: str("high")}, 403)
+
+	entries = nil
+	do(t, owner, "GET", "/audit?target=project:"+strconv.FormatInt(guest.ID, 10), nil, &entries)
+	updates := 0
+	for _, e := range entries {
+		if e.Action == "repository.update" && e.Payload["before"] != nil && e.Payload["after"] != nil {
+			updates++
+		}
+	}
+	if updates != 2 {
+		t.Errorf("repository.update audit rows = %d, want 2", updates)
 	}
 }
 

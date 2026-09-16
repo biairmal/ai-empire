@@ -4,7 +4,7 @@ Self-hosted AI software development platform. Spec: [AI_SOFTWARE_DEV_EMPIRE.md](
 
 **New here or lost? Read [docs/README.md](docs/README.md)** (overview), then [docs/database.md](docs/database.md) and [docs/apps.md](docs/apps.md).
 
-**Status: V1 (M0–M1.8).** A human creates a task in one repository of a project. A worker implements it with Claude Code in an isolated git worktree and runs the tests. It pushes a branch and then stops at the merge gate. When a human approves, the worker merges the approved commit.
+**Status: V1 (M0–M1.9). V2 deferred; next is V3.** A human creates a task in one repository of a project. A worker implements it with Claude Code in an isolated git worktree and runs the tests. It pushes a branch and then stops at the merge gate. When a human approves, the worker merges the approved commit.
 
 ## Requirements
 
@@ -41,7 +41,7 @@ empire repo add -project guest -name frontend -repo git@github.com:me/guest-fe.g
 empire task create -project guest -repo backend -desc "GET /health returns {\"status\":\"ok\"}" add /health endpoint
 empire task create -project guest -repo frontend -after 1 show API health in the footer
 empire task list
-empire approvals                       # the merge gate shows up here with a diffstat
+empire approvals                       # the merge gate: agent summary + diffstat
 empire approve 1 -m "looks good"       # or: request-changes 1 -m "...", reject 1
 empire task get 1                      # task + agent runs (tokens, cost, log path) + approvals
 empire audit -target task:1
@@ -89,9 +89,8 @@ Auth: `Authorization: Bearer <token>`. Worker calls also send `X-Worker-ID`.
 | Owner | Worker |
 |-------|--------|
 | `POST /clients`, `GET /clients[/{ref}]` | `POST /workers/register` |
-| `POST /projects`, `GET /projects[/{ref}]`, `POST /projects/{ref}/client` | |
-| `POST\|GET /projects/{ref}/repositories`, `GET /repositories` | |
-| `POST /tasks`, `GET /tasks[/{id}]` | `POST /workers/{id}/heartbeat`, `POST /workers/{id}/claim` |
-| `POST /tasks/{id}/cancel`, `POST /tasks/{id}/retry` | `POST /tasks/{id}/transition`, `POST /tasks/{id}/authorize` |
-| `GET /approvals[/{id}]`, `POST /approvals/{id}/approve\|request-changes\|reject` | `GET /tasks/{id}/context` |
-| `GET /audit?target=task:1`, `GET /workers` | `POST /tasks/{id}/runs`, `POST /runs/{id}/finish` |
+| `POST /projects`, `GET /projects[/{ref}]`, `PATCH /projects/{ref}`, `POST /projects/{ref}/client` | `POST /workers/{id}/heartbeat`, `POST /workers/{id}/claim` |
+| `POST /projects/{ref}/repositories`, `GET /projects/{ref}/repositories`, `PATCH /projects/{ref}/repositories/{name}`, `GET /repositories` | `POST /tasks/{id}/transition`, `POST /tasks/{id}/authorize` |
+| `POST /tasks`, `GET /tasks[/{id}]`, `POST /tasks/{id}/cancel`, `POST /tasks/{id}/retry` | `GET /tasks/{id}/context` |
+| `GET /approvals[/{id}]`, `POST /approvals/{id}/approve` · `/request-changes` · `/reject` | `POST /tasks/{id}/runs`, `POST /runs/{id}/finish` |
+| `GET /audit?target=task:1`, `GET /workers` | |

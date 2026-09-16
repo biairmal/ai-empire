@@ -23,6 +23,7 @@ type Result struct {
 	ExitStatus int
 	Tokens     int64
 	CostUSD    float64
+	Summary    string // the agent's own account of what it did
 }
 
 // ClaudeCode runs Claude Code headless in the worktree. acceptEdits lets it edit
@@ -71,6 +72,7 @@ func (c ClaudeCode) Run(ctx context.Context, dir, prompt string, log io.Writer) 
 		u := reply.Usage
 		res.Tokens = u.Input + u.Output + u.CacheCreate + u.CacheRead
 		res.CostUSD = reply.TotalCostUSD
+		res.Summary = strings.TrimSpace(reply.Result)
 		if reply.IsError && err == nil {
 			err = fmt.Errorf("agent reported error: %s", reply.Result)
 		}
@@ -108,6 +110,7 @@ func (Fake) Run(ctx context.Context, dir, prompt string, log io.Writer) (Result,
 	if _, err := f.WriteString(line); err != nil {
 		return Result{ExitStatus: 1}, err
 	}
-	fmt.Fprint(log, "fake agent wrote: ", line)
-	return Result{}, nil
+	summary := "fake agent wrote: " + strings.TrimSpace(line)
+	fmt.Fprintln(log, summary)
+	return Result{Summary: summary}, nil
 }

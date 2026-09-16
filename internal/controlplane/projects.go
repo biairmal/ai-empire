@@ -119,6 +119,37 @@ func projectByRef(ctx context.Context, q querier, ref string) (api.Project, erro
 	return p, err
 }
 
+// updateProject changes a project's name and/or autonomy level.
+// Autonomy decides what needs a human (spec §11), so every change is audited with before/after.
+func (s *Server) updateProject(r *http.Request, a actor) (any, error) {
+	var in api.UpdateProject
+	if err := decode(r, &in); err != nil {
+		return nil, err
+	}
+	var out api.Project
+	err := s.tx(r.Context(), func(tx pgx.Tx) error {
+		ctx := r.Context()
+		before, err := projectByRef(ctx, tx, r.PathValue("ref"))
+		if err != nil {
+			return err
+		}
+		after := before
+		set(&after.Name, in.Name)
+		set(&after.AutonomyLevel, in.AutonomyLevel)
+		if after.Name == "" {
+			return errf(http.StatusBadRequest, "name cannot be empty")
+		}
+		out, err = one[api.Project](ctx, tx,
+			`UPDATE projects SET name = $2, autonomy_level = $3 WHERE id = $1 RETURNING *`,
+			before.ID, after.Name, after.AutonomyLevel)
+		if err != nil {
+			return err
+		}
+		return audit(ctx, tx, a, "project.update", projectRef(before.ID), M{"before": before, "after": out})
+	})
+	return out, err
+}
+
 // moveProject changes a project's client (spec §11B: explicit, audited).
 // Autonomy is left as is; change it deliberately if the new client needs it.
 func (s *Server) moveProject(r *http.Request, a actor) (any, error) {
@@ -193,6 +224,54 @@ func (s *Server) createRepository(r *http.Request, a actor) (any, error) {
 		return audit(ctx, tx, a, "repository.create", projectRef(p.ID), M{"repository": out})
 	})
 	return out, err
+}
+
+// updateRepository changes a repository's settings. Running tasks keep the
+// settings they were claimed with; the change applies from the next claim.
+func (s *Server) updateRepository(r *http.Request, a actor) (any, error) {
+	var in api.UpdateRepository
+	if err := decode(r, &in); err != nil {
+		return nil, err
+	}
+	var out api.Repository
+	err := s.tx(r.Context(), func(tx pgx.Tx) error {
+		ctx := r.Context()
+		p, err := projectByRef(ctx, tx, r.PathValue("ref"))
+		if err != nil {
+			return err
+		}
+		before, err := one[api.Repository](ctx, tx,
+			`SELECT * FROM repositories WHERE project_id = $1 AND name = $2 FOR UPDATE`, p.ID, r.PathValue("name"))
+		if errors.Is(err, pgx.ErrNoRows) {
+			return errf(http.StatusNotFound, "project %s has no repository %q", p.Slug, r.PathValue("name"))
+		}
+		if err != nil {
+			return err
+		}
+		after := before
+		set(&after.RepoURL, in.RepoURL)
+		set(&after.DefaultBranch, in.DefaultBranch)
+		set(&after.Stack, in.Stack)
+		set(&after.TestCommand, in.TestCommand)
+		if after.RepoURL == "" || after.DefaultBranch == "" || after.Stack == "" {
+			return errf(http.StatusBadRequest, "repo_url, default_branch and stack cannot be empty")
+		}
+		out, err = one[api.Repository](ctx, tx, `
+			UPDATE repositories SET repo_url = $2, default_branch = $3, stack = $4, test_command = $5
+			WHERE id = $1 RETURNING *`,
+			before.ID, after.RepoURL, after.DefaultBranch, after.Stack, after.TestCommand)
+		if err != nil {
+			return err
+		}
+		return audit(ctx, tx, a, "repository.update", projectRef(p.ID), M{"before": before, "after": out})
+	})
+	return out, err
+}
+
+func set(dst *string, v *string) {
+	if v != nil {
+		*dst = *v
+	}
 }
 
 func (s *Server) listProjectRepositories(r *http.Request, a actor) (any, error) {

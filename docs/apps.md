@@ -16,7 +16,7 @@ Build all three with `make build`. All config comes from environment variables. 
 
 ### What it does
 
-- Serves the HTTP API on `CP_ADDR` (default `:8080`).
+- Serves the HTTP API on `CP_ADDR` (default `:8787`).
 - Is the **only** program with database access.
 - Enforces:
   - **Authentication:** owner token vs worker token.
@@ -35,7 +35,7 @@ Build all three with `make build`. All config comes from environment variables. 
 | `DATABASE_URL` | `postgres://empire:empire@localhost:5433/empire?sslmode=disable` | Postgres connection |
 | `EMPIRE_OWNER_TOKEN` | *(required)* | Bearer token for you |
 | `EMPIRE_WORKER_TOKEN` | *(required, must differ from the owner token)* | Bearer token for workers |
-| `CP_ADDR` | `:8080` | Listen address |
+| `CP_ADDR` | `:8787` | Listen address |
 | `EMPIRE_KNOWLEDGE_DIR` | `knowledge` | Root of the knowledge repo |
 | `EMPIRE_STALE_AFTER` | `60s` | A worker with no heartbeat for this long is considered dead |
 
@@ -71,8 +71,10 @@ Every request needs `Authorization: Bearer <token>`. Worker calls also send `X-W
 |---------------|------|------|
 | `POST /clients` | `{slug, name, default_autonomy_level?}` | Create a client |
 | `POST /projects` | `{slug, name, client?, autonomy_level?}` | Create a project. Autonomy defaults to the client's default, else `conservative` |
+| `PATCH /projects/{ref}` | `{name?, autonomy_level?}` | Edit a project. Audited with before/after |
 | `POST /projects/{ref}/client` | `{client}` (slug, or `""` for none) | Move a project to another client. Refused (409) if it would split a dependency chain across clients. Autonomy is unchanged |
 | `POST /projects/{ref}/repositories` | `{name, repo_url, stack, default_branch?, test_command?}` | Add a repository |
+| `PATCH /projects/{ref}/repositories/{name}` | `{repo_url?, default_branch?, stack?, test_command?}` | Edit a repository (omitted fields are unchanged; `test_command: ""` clears it). Takes effect from the next claim. Audited with before/after |
 | `POST /tasks` | `{project, repository?, title, description?, required_capabilities?, context_docs?, depends_on?}` | Create a task. `repository` (name) may be omitted only if the project has one repo. `depends_on` may point to any project **of the same client** (or client-less to client-less). Checks that `context_docs` exist |
 | `POST /tasks/{id}/cancel` | none | → `CANCELLED`, and closes open gates |
 | `POST /tasks/{id}/retry` | none | `FAILED` → `PENDING`, resets attempts |
@@ -105,7 +107,7 @@ Every request needs `Authorization: Bearer <token>`. Worker calls also send `X-W
 | `POST /tasks/{id}/authorize` | `{action, stage, summary?, subject_version?}` | Policy check. Replies `{allowed, approval_id?, subject_version?}`. If a human is needed, opens a gate and parks the task |
 | `GET /tasks/{id}/context` | none | `{files, content}`, the context bundle |
 | `POST /tasks/{id}/runs` | `{model, context_files}` | Start an agent run, return `{id}` |
-| `POST /runs/{id}/finish` | `{exit_status, log_path, tokens, cost_usd}` | Close the run |
+| `POST /runs/{id}/finish` | `{exit_status, log_path, tokens, cost_usd, summary}` | Close the run. `summary` is what the agent says it did |
 
 **How claiming works:** a single SQL query picks the lowest-id `PENDING` task that meets all of these conditions:
 - its required capabilities ⊆ the worker's capabilities
@@ -152,7 +154,7 @@ Any error → `FAILED` with the error text (last 4000 chars) in `last_error`.
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
-| `EMPIRE_CP_URL` | `http://localhost:8080` | Control plane address |
+| `EMPIRE_CP_URL` | `http://localhost:8787` | Control plane address |
 | `EMPIRE_WORKER_TOKEN` | *(required)* | Must match the control plane's |
 | `EMPIRE_WORKER_NAME` | hostname | Identity. Reusing a name reuses the worker row |
 | `EMPIRE_WORKER_CAPS` | `go` | Comma-separated capabilities |
@@ -197,7 +199,7 @@ To add another agent, implement the `Agent` interface in [agent.go](../internal/
 
 ## 3. CLI (`empire`)
 
-It uses `EMPIRE_CP_URL` (default `http://localhost:8080`) and `EMPIRE_OWNER_TOKEN`. **Flags go before positional arguments.**
+It uses `EMPIRE_CP_URL` (default `http://localhost:8787`) and `EMPIRE_OWNER_TOKEN`. **Flags go before positional arguments.**
 
 On Windows, run `. .\env.ps1` in the terminal first ([env.ps1](../env.ps1)). It sets both variables and adds `bin\` to PATH.
 
@@ -207,8 +209,10 @@ On Windows, run `. .\env.ps1` in the terminal first ([env.ps1](../env.ps1)). It 
 | List clients | `empire client list` |
 | Create project | `empire project create -slug shop -name "Shop" -client acme` (omit `-client` for personal projects; `-autonomy` overrides the client default) |
 | List projects | `empire project list` (shows client and repositories) |
-| Move project | `empire project move shop -client other` · `empire project move shop -none` |
+| Edit project | `empire project set shop -autonomy medium` · `empire project set shop -name "Shop v2"` |
+| Move project | `empire project move shop -client other` · `empire project move shop -none` (autonomy is not changed; use `project set`) |
 | Add repository | `empire repo add -project shop -name backend -repo git@github.com:me/shop-be.git -stack go -test "go test ./..."` (`-branch` defaults to `main`) |
+| Edit repository | `empire repo set -project shop -name backend -test "go test -short ./..."` · `-branch develop` · `-repo URL` · `-stack go` · `-test ""` clears it |
 | List repositories | `empire repo list` · `empire repo list -project shop` |
 | Create task | `empire task create -project shop -repo backend -desc "details…" -doc requirements/prd.md -after 3 Add QR validation` |
 | List tasks | `empire task list` · `empire task list -status FAILED` · `empire task list -project shop` |

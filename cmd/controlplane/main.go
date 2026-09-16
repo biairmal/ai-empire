@@ -44,7 +44,7 @@ func main() {
 	go srv.RunReaper(ctx)
 
 	hs := &http.Server{
-		Addr:              env("CP_ADDR", ":8080"),
+		Addr:              env("CP_ADDR", ":8787"),
 		Handler:           srv.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}

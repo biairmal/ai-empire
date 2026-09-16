@@ -5,6 +5,7 @@ PostgreSQL 17 is the **single source of truth** for platform state (spec §31). 
 - Schema source: [migrations/](../migrations/)
   - `000002_core`: tasks, workers, approvals, audit
   - `000003_clients_repositories`: clients and repositories
+  - `000004_agent_run_summary`: `agent_runs.summary`
 - Connection (dev): `postgres://empire:empire@localhost:5433/empire`
 - Open a SQL shell: `docker compose exec postgres psql -U empire -d empire`
 
@@ -54,7 +55,7 @@ Source code, documents and knowledge are **not** in the database. They live in g
                                      │ task_id      │  │ model, context_files │
 ┌─────────────────────┐              │ depends_on   │  │ tokens, cost_usd     │
 │       workers       │ 1        *   └──────────────┘  └──────────▲───────────┘
-│ id PK, name UNIQUE  │────────────────────────────────────────────┘
+│ id PK, name UNIQUE  │─────────────────────── (summary) ──────────┘
 │ capabilities[]      │  (also tasks.worker_id while in flight)
 │ status, heartbeat   │
 └─────────────────────┘
@@ -70,7 +71,7 @@ Source code, documents and knowledge are **not** in the database. They live in g
 
 **Why approvals link to tasks by text rather than a foreign key:** approval requests are meant to cover other subjects later (PRDs and designs in V3), so they point at their subject with `subject_type` + `subject_ref`.
 
-Also present: `schema_migrations`, which golang-migrate manages. It records the current schema version (3).
+Also present: `schema_migrations`, which golang-migrate manages. It records the current schema version (4).
 
 ---
 
@@ -141,7 +142,7 @@ A product (spec §11A). Its code lives in one or more repositories.
 | `autonomy_level` | autonomy_level | Given at creation, or else the client's default, or else `conservative`. Moving the project to another client does **not** change it |
 | `created_at` | timestamptz | |
 
-Written by: **O** (`empire project create`; `empire project move` changes `client_id`).
+Written by: **O** (`empire project create`; `empire project set` changes `name` / `autonomy_level`; `empire project move` changes `client_id`).
 
 A move is refused when the project has task dependencies with a project that would then belong to a different client.
 
@@ -162,7 +163,7 @@ A git repository of a project.
 
 Constraints: `UNIQUE (project_id, name)`, plus `UNIQUE (id, project_id)`, which is the target of the tasks composite FK.
 
-Written by: **O** (`empire repo add`). There's no update or delete endpoint yet.
+Written by: **O** (`empire repo add`; `empire repo set` changes `repo_url`, `default_branch`, `stack`, `test_command`). There's no rename or delete yet. Running tasks keep the settings they were claimed with.
 
 Migration 000003 converted each pre-existing project into a project with one repository named after the project slug.
 
@@ -243,6 +244,7 @@ One execution of the coding agent.
 | `log_path` | text | Full agent output on the **worker's** disk: `workspaces/logs/task-N-run-M.log` |
 | `tokens` | bigint | Input + output + cache tokens (as reported by Claude) |
 | `cost_usd` | numeric(12,6) | As reported by Claude |
+| `summary` | text | The agent's own account of what it did (Claude's final message, up to 10 000 bytes). Also shown in the merge approval request |
 
 Written by: **W** (`POST /tasks/{id}/runs`, then `POST /runs/{id}/finish`).
 
@@ -259,7 +261,7 @@ A gate waiting for (or already given) a human decision. There is **one merge gat
 | `subject_version` | text | For merges: the **exact commit sha** you're approving. The worker merges only this sha |
 | `gate` | text | The policy action, e.g. `merge_protected` |
 | `status` | approval_status | Default `PENDING_APPROVAL` |
-| `summary` | text | What you see in `empire approvals`, e.g. `Merge ai/task-7 (abc123) into backend:main …` plus the diffstat |
+| `summary` | text | What you see in `empire approvals`: `Merge ai/task-7 (abc123) into backend:main …`, then the agent summary, then the diffstat |
 | `requested_by` | text | e.g. `worker:1`. This actor can never decide the request |
 | `created_at` | timestamptz | |
 
@@ -303,7 +305,9 @@ Triggers `audit_log_no_update_delete` and `audit_log_no_truncate` raise an error
 | `client.create` | client | Client created | full client |
 | `project.create` | project | Project created | full project, `client` |
 | `project.move_client` | project | Project moved to another client or none | `from_client_id`, `to_client_id`, `to_client` |
+| `project.update` | project | Project name/autonomy changed | `before`, `after` |
 | `repository.create` | project | Repository added | full repository |
+| `repository.update` | project | Repository settings changed | `before`, `after` |
 | `task.create` | task | Task created | full task, `repository`, `depends_on` |
 | `task.status` | task | **Any** status change | `from`, `to`, plus `stage` / `error` / `reason` / `approval_id` |
 | `worker.register` | worker | Worker starts | full worker |
@@ -368,7 +372,7 @@ SELECT id, title, attempts, last_error FROM tasks WHERE status = 'FAILED';
 
 ## 5. Changing the schema
 
-1. Add `migrations/000004_<name>.up.sql` and a matching `.down.sql`.
+1. Add `migrations/000005_<name>.up.sql` and a matching `.down.sql`.
 2. Run `make migrate` (or `make migrate-down` to roll back one step).
 3. If you added a column to a table, add the field to the struct in [internal/api/types.go](../internal/api/types.go). Queries use `SELECT *` and map columns by their `db:"…"` tag, so a column without a matching field causes a loud error.
 4. `make test` recreates the `empire_test` database from all migrations, so it checks the new migration too.

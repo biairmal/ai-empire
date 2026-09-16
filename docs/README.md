@@ -18,7 +18,7 @@ For what's planned next, see [ROADMAP.md](../ROADMAP.md). For the full vision, s
       ▼
 ┌──────────────────────────┐        ┌───────────────────────────┐
 │  CONTROL PLANE           │  SQL   │  PostgreSQL (Docker)      │
-│  bin/controlplane :8080  │◄──────►│  localhost:5433 / empire  │
+│  bin/controlplane :8787  │◄──────►│  localhost:5433 / empire  │
 │  - the only thing that   │        │  the single source of     │
 │    touches the database  │        │  truth for all state      │
 │  - enforces rules/policy │        └───────────────────────────┘
@@ -137,7 +137,7 @@ This is what happened in the real demo run, step by step, with the database rows
                              tasks: status=WAITING_FOR_HUMAN,
                                stage=merge, worker_id=NULL
                                                                         (worker is free again)
- empire approvals ─────────► lists the gate + diffstat
+ empire approvals ─────────► lists the gate: agent summary + diffstat
  empire approve 1 ─────────► approval_decisions: new row
                              approval_requests: APPROVED
                              tasks: status=PENDING (stage stays merge)
@@ -298,7 +298,7 @@ AI Empire/
 - All workers share one token, and a worker's identity (`X-Worker-ID`) is self-declared.
 - A worker runs one task at a time, and there's no per-project lock for running tasks in parallel on one machine.
 - Cancelling a task closes its open gates as `REJECTED` without writing an `approval_decisions` row.
-- Clients, projects and repositories can be created (and projects moved), but not renamed or deleted yet.
+- Clients, projects and repositories can be created and edited (projects can be moved), but slugs/names cannot be renamed and nothing can be deleted yet.
 - A feature spanning repositories gets one merge gate per repository. A combined all-or-nothing approval is deferred to V3.
 - No web UI, notifications, or Hermes yet (that's V2).
 - No document contracts, workflow engine, or knowledge graph yet (that's V3).

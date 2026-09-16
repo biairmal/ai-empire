@@ -93,6 +93,8 @@ func (s *Server) Handler() http.Handler {
 	h("POST /projects", ownerOnly, s.createProject)
 	h("GET /projects", anyone, s.listProjects)
 	h("GET /projects/{ref}", anyone, s.getProject)
+	h("PATCH /projects/{ref}", ownerOnly, s.updateProject)
+	h("PATCH /projects/{ref}/repositories/{name}", ownerOnly, s.updateRepository)
 	h("POST /projects/{ref}/client", ownerOnly, s.moveProject)
 	h("POST /projects/{ref}/repositories", ownerOnly, s.createRepository)
 	h("GET /projects/{ref}/repositories", anyone, s.listProjectRepositories)

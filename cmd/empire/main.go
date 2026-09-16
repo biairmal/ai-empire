@@ -22,8 +22,10 @@ const usage = `usage: empire <command> [flags] [args]
   client list
   project create -slug S -name N [-client C] [-autonomy conservative|medium|high]
   project list
+  project set PROJECT [-name N] [-autonomy conservative|medium|high]
   project move PROJECT -client C | -none
   repo add -project P -name N -repo URL -stack go [-branch main] [-test CMD]
+  repo set -project P -name N [-repo URL] [-branch B] [-stack S] [-test CMD]   (-test "" clears it)
   repo list [-project P]
   task create -project P [-repo NAME] [-desc TEXT] [-doc PATH]... [-cap CAP]... [-after ID]... TITLE...
   task list [-status S] [-project P]
@@ -37,7 +39,7 @@ const usage = `usage: empire <command> [flags] [args]
   workers
   audit [-target task:ID]
 
-env: EMPIRE_CP_URL (default http://localhost:8080), EMPIRE_OWNER_TOKEN
+env: EMPIRE_CP_URL (default http://localhost:8787), EMPIRE_OWNER_TOKEN
 `
 
 type list []string
@@ -52,7 +54,7 @@ func main() {
 	}
 	cp := os.Getenv("EMPIRE_CP_URL")
 	if cp == "" {
-		cp = "http://localhost:8080"
+		cp = "http://localhost:8787"
 	}
 	c := client.New(cp, os.Getenv("EMPIRE_OWNER_TOKEN"))
 	if err := dispatch(context.Background(), c, os.Args[1:]); err != nil {
@@ -131,6 +133,25 @@ func dispatch(ctx context.Context, c *client.Client, args []string) error {
 			return fmt.Sprintf("%d\t%s\t%s\t%s\t%s", p.ID, p.Slug, client, p.AutonomyLevel, strings.Join(repos[p.ID], ", "))
 		})
 
+	case "project set":
+		if len(args) < 2 {
+			return errors.New("usage: empire project set PROJECT [-name N] [-autonomy LEVEL]")
+		}
+		name := fs.String("name", "", "")
+		autonomy := fs.String("autonomy", "", "")
+		fs.Parse(args[2:])
+		given := setFlags(fs)
+		in := api.UpdateProject{Name: given.ptr("name", *name), AutonomyLevel: given.ptr("autonomy", *autonomy)}
+		if len(given) == 0 {
+			return errors.New("nothing to change: pass -name and/or -autonomy")
+		}
+		var out api.Project
+		if err := c.Do(ctx, "PATCH", "/projects/"+url.PathEscape(args[1]), in, &out); err != nil {
+			return err
+		}
+		fmt.Printf("project %s: name %q, autonomy %s\n", out.Slug, out.Name, out.AutonomyLevel)
+		return nil
+
 	case "project move":
 		if len(args) < 2 {
 			return errors.New("usage: empire project move PROJECT -client C | -none")
@@ -167,6 +188,33 @@ func dispatch(ctx context.Context, c *client.Client, args []string) error {
 		}
 		var out api.Repository
 		if err := post("/projects/"+url.PathEscape(*project)+"/repositories", in, &out); err != nil {
+			return err
+		}
+		return show(out)
+
+	case "repo set":
+		project := fs.String("project", "", "")
+		name := fs.String("name", "", "")
+		repoURL := fs.String("repo", "", "")
+		branch := fs.String("branch", "", "")
+		stack := fs.String("stack", "", "")
+		test := fs.String("test", "", "")
+		fs.Parse(args[1:])
+		if *project == "" || *name == "" {
+			return errors.New("-project and -name are required")
+		}
+		given := setFlags(fs)
+		in := api.UpdateRepository{
+			RepoURL:       given.ptr("repo", *repoURL),
+			DefaultBranch: given.ptr("branch", *branch),
+			Stack:         given.ptr("stack", *stack),
+			TestCommand:   given.ptr("test", *test),
+		}
+		if in == (api.UpdateRepository{}) {
+			return errors.New("nothing to change: pass -repo, -branch, -stack and/or -test")
+		}
+		var out api.Repository
+		if err := c.Do(ctx, "PATCH", "/projects/"+url.PathEscape(*project)+"/repositories/"+url.PathEscape(*name), in, &out); err != nil {
 			return err
 		}
 		return show(out)
@@ -301,6 +349,23 @@ func dispatch(ctx context.Context, c *client.Client, args []string) error {
 	return nil
 }
 
+// flagSet records which flags were given explicitly, so "-test ”" can clear a value
+// while an omitted flag leaves it unchanged.
+type flagSet map[string]bool
+
+func setFlags(fs *flag.FlagSet) flagSet {
+	given := flagSet{}
+	fs.Visit(func(f *flag.Flag) { given[f.Name] = true })
+	return given
+}
+
+func (g flagSet) ptr(name, value string) *string {
+	if !g[name] {
+		return nil
+	}
+	return &value
+}
+
 func arg(args []string) string {
 	if len(args) < 2 {
 		fmt.Fprint(os.Stderr, usage)
@@ -312,6 +377,7 @@ func arg(args []string) string {
 func show(v any) error {
 	e := json.NewEncoder(os.Stdout)
 	e.SetIndent("", "  ")
+	e.SetEscapeHTML(false)
 	return e.Encode(v)
 }
 

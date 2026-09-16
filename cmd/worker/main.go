@@ -32,7 +32,7 @@ func main() {
 		log.Fatalf("EMPIRE_AGENT: unknown agent %q (claude|fake)", a)
 	}
 
-	w, err := worker.New(client.New(env("EMPIRE_CP_URL", "http://localhost:8080"), token), worker.Config{
+	w, err := worker.New(client.New(env("EMPIRE_CP_URL", "http://localhost:8787"), token), worker.Config{
 		Name:         env("EMPIRE_WORKER_NAME", host),
 		Capabilities: strings.Split(env("EMPIRE_WORKER_CAPS", "go"), ","),
 		Workspaces:   env("EMPIRE_WORKSPACES", "workspaces"),

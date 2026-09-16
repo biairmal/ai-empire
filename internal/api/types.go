@@ -72,6 +72,7 @@ type AgentRun struct {
 	LogPath      string     `json:"log_path" db:"log_path"`
 	Tokens       int64      `json:"tokens" db:"tokens"`
 	CostUSD      float64    `json:"cost_usd" db:"cost_usd"`
+	Summary      string     `json:"summary" db:"summary"` // what the agent says it did
 }
 
 type ApprovalRequest struct {
@@ -104,6 +105,20 @@ type CreateProject struct {
 	Name          string `json:"name"`
 	Client        string `json:"client,omitempty"`         // client slug; empty = personal
 	AutonomyLevel string `json:"autonomy_level,omitempty"` // empty = client default, else conservative
+}
+
+// Update bodies: nil fields are left unchanged.
+
+type UpdateProject struct {
+	Name          *string `json:"name,omitempty"`
+	AutonomyLevel *string `json:"autonomy_level,omitempty"`
+}
+
+type UpdateRepository struct {
+	RepoURL       *string `json:"repo_url,omitempty"`
+	DefaultBranch *string `json:"default_branch,omitempty"`
+	Stack         *string `json:"stack,omitempty"`
+	TestCommand   *string `json:"test_command,omitempty"` // "" clears it
 }
 
 type MoveProject struct {
@@ -181,6 +196,7 @@ type FinishRun struct {
 	LogPath    string  `json:"log_path"`
 	Tokens     int64   `json:"tokens"`
 	CostUSD    float64 `json:"cost_usd"`
+	Summary    string  `json:"summary"`
 }
 
 type Decision struct {

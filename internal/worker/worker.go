@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"aiempire/internal/api"
 	"aiempire/internal/client"
@@ -217,7 +218,8 @@ func (w *Worker) implement(ctx context.Context, cl api.Claim, base, dir string) 
 		return err
 	}
 
-	if err := w.runAgent(ctx, cl, dir, bundle.Files); err != nil {
+	agentSummary, err := w.runAgent(ctx, cl, dir, bundle.Files)
+	if err != nil {
 		return err
 	}
 
@@ -254,8 +256,12 @@ func (w *Worker) implement(ctx context.Context, cl api.Claim, base, dir string) 
 	}
 
 	diffstat, _ := git(ctx, dir, "diff", "--stat", "origin/"+repo.DefaultBranch+"..."+head)
-	summary := fmt.Sprintf("Merge %s (%s) into %s:%s for task #%d: %s\n\n%s",
-		branch, head[:min(12, len(head))], repo.Name, repo.DefaultBranch, t.ID, t.Title, diffstat)
+	if agentSummary == "" {
+		agentSummary = "(the agent gave no summary)"
+	}
+	summary := fmt.Sprintf("Merge %s (%s) into %s:%s for task #%d: %s\n\nAgent summary:\n%s\n\n%s",
+		branch, head[:min(12, len(head))], repo.Name, repo.DefaultBranch, t.ID, t.Title,
+		truncate(agentSummary, 3000), diffstat)
 	ok, _, err := w.authorize(ctx, t, policy.MergeProtected, task.StageMerge, summary, head)
 	if err != nil {
 		return err
@@ -298,32 +304,45 @@ func (w *Worker) merge(ctx context.Context, cl api.Claim, base, dir string) erro
 	return w.transition(ctx, t.ID, task.Completed, "")
 }
 
-func (w *Worker) runAgent(ctx context.Context, cl api.Claim, dir string, files []string) error {
+// runAgent runs the agent once, records the run, and returns the agent's summary.
+func (w *Worker) runAgent(ctx context.Context, cl api.Claim, dir string, files []string) (string, error) {
 	t := cl.Task
 	var run api.ID
 	err := w.c.Do(ctx, "POST", fmt.Sprintf("/tasks/%d/runs", t.ID),
 		api.StartRun{Model: w.cfg.Agent.Name(), ContextFiles: files}, &run)
 	if err != nil {
-		return err
+		return "", err
 	}
 	logDir := filepath.Join(w.cfg.Workspaces, "logs")
 	os.MkdirAll(logDir, 0o755)
 	logPath := filepath.Join(logDir, fmt.Sprintf("task-%d-run-%d.log", t.ID, run.ID))
 	f, err := os.Create(logPath)
 	if err != nil {
-		return err
+		return "", err
 	}
 	res, runErr := w.cfg.Agent.Run(ctx, dir, prompt(cl), f)
 	f.Close()
 
-	finish := api.FinishRun{ExitStatus: res.ExitStatus, LogPath: logPath, Tokens: res.Tokens, CostUSD: res.CostUSD}
+	finish := api.FinishRun{ExitStatus: res.ExitStatus, LogPath: logPath, Tokens: res.Tokens, CostUSD: res.CostUSD,
+		Summary: truncate(res.Summary, 10000)}
 	if err := w.c.Do(context.WithoutCancel(ctx), "POST", fmt.Sprintf("/runs/%d/finish", run.ID), finish, nil); err != nil {
 		log.Printf("task %d: record run finish: %v", t.ID, err)
 	}
 	if runErr != nil {
-		return fmt.Errorf("agent failed (log %s): %w", logPath, runErr)
+		return "", fmt.Errorf("agent failed (log %s): %w", logPath, runErr)
 	}
-	return nil
+	return res.Summary, nil
+}
+
+// truncate keeps the first n bytes of s, cut on a rune boundary (Postgres rejects invalid UTF-8).
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n] + "…"
 }
 
 func (w *Worker) test(ctx context.Context, t api.Task, repo api.Repository, dir string) error {

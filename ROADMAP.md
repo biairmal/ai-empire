@@ -168,7 +168,19 @@ Client → projects → repositories. A client (optional) is the confidentiality
 
 ---
 
-## V2 — Persistent AI Interface (§41)
+### M1.9 V1 polish (found while running real tasks)
+- [x] Edit a repository: `PATCH /projects/{ref}/repositories/{name}` (URL, branch, stack, test command), audited with before/after. CLI `empire repo set`
+- [x] Edit a project: `PATCH /projects/{ref}` (name, autonomy level), audited. CLI `empire project set`
+- [x] Record the agent's own summary on `agent_runs.summary`
+- [x] Show the agent summary in the merge approval request, above the diffstat
+
+**Done when:** you can change a repo's test command and a project's autonomy from the CLI, both show up in `audit_log`, and `empire approvals` shows what the agent says it changed.
+
+---
+
+## V2 — Persistent AI Interface (§41) — *deferred*
+> Not needed yet. The `empire` CLI is the interface for now. V3 does not depend on V2. Revisit when you want phone access, notifications, or a remote worker.
+
 **Goal:** manage development from phone or laptop without operating the infrastructure yourself.
 
 ### M2.1 MCP server over the Control Plane API (§5, §33)
@@ -305,7 +317,8 @@ Do these in order of real pain, not in list order.
 | M1.4–1.6 | Git, context, worker | Crash-safe worker in isolated worktrees |
 | M1.7 | Coding agent | **V1: task → code → tests → merge approval** |
 | M1.8 | Clients & multi-repo projects | Client → projects → repos; client knowledge isolated per client |
-| M2 | Hermes + notifications | **V2: run it all from your phone** |
+| M1.9 | V1 polish | Edit repos/projects; agent summary in approvals |
+| M2 | Hermes + notifications *(deferred)* | **V2: run it all from your phone** |
 | M3.1–3.4 | Contracts, validation, workflows | **PRD → design → tasks pipeline with gates** |
 | M3.5–3.8 | Roles, graph, impact | **V3: traceability + impact analysis** |
 | V4 | Factory | Multiple projects in parallel, within budget |
