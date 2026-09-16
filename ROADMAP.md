@@ -1,0 +1,263 @@
+# AI Software Development Empire — Implementation Roadmap
+
+Derived from [AI_SOFTWARE_DEV_EMPIRE.md](AI_SOFTWARE_DEV_EMPIRE.md). `§N` points to a section of that spec.
+
+**How to use this file**
+- Work top to bottom. Each milestone ends with a **Done when** check you can demo. Don't start the next milestone until that check passes.
+- Tick `[x]` as you go. Commit this file along with the code.
+- Build only what the current milestone needs (§40). Anything marked *(defer)* waits until a real need shows up.
+
+---
+
+## Phase 0 — Foundations
+
+### M0.1 Repository & tooling
+- [x] `git init` this workspace; add `.gitignore` (Go, `.env`, `workspaces/`)
+- [x] Choose a layout: one Go module, a modular monolith (§6)
+  ```text
+  cmd/controlplane/    # HTTP API + scheduler
+  cmd/worker/          # worker binary
+  internal/            # project, task, workflow, approval, policy, audit, context, knowledge
+  migrations/          # SQL migrations
+  knowledge/           # Markdown knowledge repo (later its own git repo)
+  ```
+- [x] `docker-compose.yml` with PostgreSQL only (add Redis in M1.6 only if it's needed). Host port 5433
+- [x] `Makefile` / `justfile` with `up`, `migrate`, `test`, `run-cp`, `run-worker`
+- [x] Pick a migration tool: `golang-migrate`, run as a Compose service (`docker compose run --rm migrate`)
+
+**Done when:** `make up && make migrate && make test` runs clean on an empty project.
+
+### M0.2 Knowledge repository skeleton (§13, §21)
+- [x] Create the scope folders:
+  ```text
+  knowledge/
+  ├── global/            # engineering + security principles
+  ├── stacks/go/         # stack knowledge
+  ├── stacks/dotnet/
+  ├── templates/         # document templates (§17)
+  ├── contracts/         # document contracts (§16)
+  └── projects/<slug>/   # requirements/ ux/ architecture/ decisions/ api/ database/ testing/ operations/
+  ```
+- [x] Write `global/engineering-principles.md` (copy §2) and `global/security-principles.md`
+- [x] Define the frontmatter format for every document (§15): `type, id, project, status, version` plus relationship keys → [knowledge/contracts/frontmatter.md](knowledge/contracts/frontmatter.md)
+
+**Done when:** you can open `knowledge/` in Obsidian and browse it. Nothing else is needed yet.
+
+---
+
+## V1 — Core Platform (§41)
+**Goal:** human creates a task → one worker executes it autonomously under controlled authority.
+
+### M1.1 Data model (§31)
+- [ ] `projects` (id, slug, name, repo_url, default_branch, stack, autonomy_level)
+- [ ] `tasks` (id, project_id, title, description, status, required_capabilities, created_at, updated_at)
+- [ ] `task_dependencies` (task_id, depends_on_task_id)
+- [ ] `workers` (id, name, capabilities, last_heartbeat_at, status)
+- [ ] `agent_runs` (id, task_id, worker_id, model, started_at, finished_at, exit_status, log_path, tokens, cost)
+- [ ] `approval_requests` (id, project_id, subject_type, subject_ref, subject_version, gate, status, requested_by, created_at)
+- [ ] `approval_decisions` (id, approval_request_id, decision, comment, decided_by, decided_at)
+- [ ] `audit_log` (id, actor_type, actor_id, action, target, payload jsonb, created_at). Append-only, enforced with a DB rule or trigger
+- [ ] Task status is a Postgres enum with the 9 states from §30
+- [ ] Approval status is an enum: `PENDING_APPROVAL, APPROVED, CHANGES_REQUESTED, REJECTED` (§8)
+
+**Done when:** migrations apply, and a single SQL insert/select smoke test passes for each table.
+
+### M1.2 Control Plane API: projects & tasks (§6, §33)
+- [ ] HTTP server (stdlib `net/http` is enough) with a static API token for auth (§34)
+- [ ] `POST/GET /projects`, `GET /projects/{id}`
+- [ ] `POST/GET /tasks`, `GET /tasks/{id}`, `POST /tasks/{id}/cancel`, `POST /tasks/{id}/retry`
+- [ ] A task state machine in one function that rejects illegal transitions; add a table-driven test for it
+- [ ] Every mutating endpoint writes an `audit_log` row (§9 auditable actions)
+- [ ] Minimal CLI (`empire task create ...`) or plain `curl` examples in the README
+
+**Done when:** you can create a project and a task over HTTP, move it through legal states, and every action shows up in `audit_log`.
+
+### M1.3 Approval gates & policy (§8, §10, §11)
+- [ ] `GET /approvals`, `GET /approvals/{id}`, `POST /approvals/{id}/approve|request-changes|reject`
+- [ ] Rule: the actor that requested an approval cannot decide it (§9, §26). Test it
+- [ ] Policy as a static per-project YAML/JSON map, `action → auto | approval`, with three presets: `high`, `medium`, `conservative` (§11)
+- [ ] One function `policy.Requires(project, action) bool`. Workers call it; they don't hardcode rules
+- [ ] Classify the §10 actions (low/medium/high). High-risk actions always require approval, whatever the preset
+
+**Done when:** a task that hits a gated action moves to `WAITING_FOR_HUMAN`, and continues only after `approve`.
+
+### M1.4 Git integration & workspace isolation (§24, §29)
+- [ ] Worker clones/fetches the project repo into `workspaces/<project>/_base`
+- [ ] Each task gets its own `git worktree` on branch `ai/<task-id>`
+- [ ] Clean up the worktree after the task reaches a terminal state
+- [ ] The agent process runs with the worktree as its cwd; no other project paths get mounted or passed in
+- [ ] *(defer)* Docker-per-task. Add it when a project needs toolchain isolation
+
+**Done when:** two tasks on the same repo run side by side in separate worktrees without touching each other.
+
+### M1.5 Context loading, V1 version (§22)
+- [ ] Resolver input: task → project → stack
+- [ ] Output: a single `CONTEXT.md` written into the worktree, containing:
+  `global/*` + `stacks/<project stack>/*` + `projects/<slug>/*` docs listed in task metadata
+- [ ] Hard rule: never include another project's folder or another stack's folder (§21). Test it
+- [ ] Log which files were included on the `agent_run`
+
+**Done when:** a Go-stack task's context has no .NET or other-project content, and a test proves it.
+
+### M1.6 Worker & scheduler (§27, §28, §30)
+- [ ] Worker binary: register → heartbeat loop → claim → prepare workspace → load context → run agent → validate → report → cleanup
+- [ ] Claiming: `SELECT ... FOR UPDATE SKIP LOCKED` in Postgres (no Redis needed for one worker)
+- [ ] Capability match: only claim tasks whose `required_capabilities ⊆ worker.capabilities`
+- [ ] Heartbeat every N seconds; the control plane marks workers stale after M missed beats and requeues their `RUNNING` tasks
+- [ ] Control-plane restart safety: all state lives in Postgres, and a restart just resumes
+- [ ] *(defer)* Redis streams/queues. Add them when you have multiple workers and Postgres polling becomes a measured bottleneck
+
+**Done when:** you kill the worker mid-task, restart it, and the task gets requeued and finishes.
+
+### M1.7 One AI coding agent (§32)
+- [ ] Put a small interface behind the agent call: `Run(ctx, worktree, prompt) (Result, error)`
+- [ ] First implementation: Claude Code headless (`claude -p ...`) or another CLI agent, restricted to the worktree
+- [ ] Capture stdout/stderr to a log file, plus exit code, duration, and tokens/cost if available → `agent_runs`
+- [ ] Post-run validation: run the project's test command (from project config) → `TESTING` → pass/fail
+- [ ] On success: commit to `ai/<task-id>`, push the branch, set the task to `WAITING_FOR_HUMAN` with a **merge** approval request
+- [ ] On approve: merge (or open a PR) → `COMPLETED`. The agent never merges to a protected branch itself (§10)
+
+**Done when (V1 goal):** `empire task create "add /health endpoint"` → the worker implements it, tests pass, a merge approval appears → you approve → the change is merged. Full trail in `audit_log`.
+
+---
+
+## V2 — Persistent AI Interface (§41)
+**Goal:** manage development from phone or laptop without operating the infrastructure yourself.
+
+### M2.1 MCP server over the Control Plane API (§5, §33)
+- [ ] Expose the §33 operations as MCP tools (thin wrappers over the HTTP API, with no direct DB access)
+- [ ] Give Hermes its own API token so the audit log shows `actor=hermes`
+- [ ] Hermes can't approve on its own. Approval tools require a human-confirmed action (e.g. Hermes relays your explicit "approve", and the decision records `decided_by=owner via hermes`)
+
+**Done when:** from an MCP client you can list projects, create a task, and approve a merge.
+
+### M2.2 Hermes operator
+- [ ] Pick the Hermes runtime (e.g. Claude with the MCP server attached, via a chat app or bot)
+- [ ] Natural-language task creation: "add X to project Y" → `create_task` (project resolved by name)
+- [ ] "What is currently running?" → a concise summary from `list_tasks` + `list_workers` (§36)
+- [ ] "Why did…?" → read the `agent_run` log and linked docs
+- [ ] Hermes memory stores only personal/operational notes, never task state (§31)
+
+**Done when:** you complete the V1 demo entirely through Hermes from your phone.
+
+### M2.3 Notifications (§39)
+- [ ] One outbound channel (Telegram, Slack, email, or ntfy; pick one)
+- [ ] Emit on: approval required, task failed, worker stale, repeated test failures, work completed
+- [ ] Notification = an outbox table plus a sender loop, so a restart doesn't lose messages
+
+**Done when:** an approval request pings your phone within seconds.
+
+### M2.4 Remote worker
+- [ ] Run the worker on a Mac Mini / mini PC against the remote control plane
+- [ ] Per-worker token; secure transport (Tailscale/WireGuard is simplest)
+- [ ] Worker gets only the repo credentials for the projects it's allowed to serve (§34)
+
+**Done when:** a task gets claimed and completed by the remote machine while your laptop is off.
+
+---
+
+## V3 — AI Software Organization (§41)
+**Goal:** the full SDLC runs through AI, stopping at human gates.
+
+### M3.1 Document contracts & templates (§16, §17, §19)
+- [ ] Write a contract + template for: PRD, Technical Design, ADR, API Spec, Database Design, Test Plan
+- [ ] *(defer)* UX Spec, Deployment Plan, Research Doc, Architecture Overview. Add each when a workflow first needs it
+- [ ] A contract lives as a YAML file next to its template: required metadata, required sections, allowed relationships, lifecycle, approval requirement
+
+### M3.2 Document validator (§18)
+- [ ] `empire docs validate [path]` covering frontmatter schema, required sections, unique IDs, valid project, allowed relationship types, referenced IDs exist, valid status/version
+- [ ] Upstream checks: e.g. a Technical Design's `satisfies` PRD must be `approved`
+- [ ] Wire it into the workflow: invalid doc → back to the generating agent with the errors
+- [ ] Run it in CI / pre-commit on the knowledge repo
+
+**Done when:** a broken document is rejected with a clear error list, and a valid one passes.
+
+### M3.3 Artifact versioning & change requests (§12)
+- [ ] Approving a doc records `(doc_id, version, git commit sha)` in `approval_requests`
+- [ ] Guard: a changed file whose approved version sha differs, with no bumped version and no change request → validation error
+- [ ] Change-request flow: CR task → doc `v(n+1)` with `supersedes` → new approval gate
+
+**Done when:** editing an approved PRD in place fails validation, and a proper v2 goes through approval.
+
+### M3.4 Workflow engine (§7)
+- [ ] Workflow definition as data (YAML): ordered steps, each with `role`, `output doc type`, `gate?`
+- [ ] Ship two workflows: `feature` (full §7 pipeline) and `quick-fix` (task → test → review → merge gate)
+- [ ] Engine: when a step completes → validate output → open gate if required → on approve, spawn the next step's tasks
+- [ ] The Planner step turns an approved design into N tasks with dependencies
+
+**Done when:** "add QR ticket validation" produces PRD → gate → design → gate → tasks → code → merge gate.
+
+### M3.5 Agent roles (§26)
+- [ ] Per role, one file under `knowledge/roles/`: responsibilities, allowed tools/actions, required context, output contract, authority limits
+- [ ] Start with Architect, Planner, Developer, Reviewer. Add Tester, Documentation, and DevOps when a workflow step needs them
+- [ ] Enforce: the reviewer run ≠ the producing run; approval never comes from an agent
+
+### M3.6 Knowledge graph & traceability (§14, §15, §38)
+- [ ] Index: parse frontmatter from all docs into a `doc_edges` table (from, rel_type, to) on each knowledge-repo commit
+- [ ] Link tasks → docs (task metadata) and commits → tasks (branch name / commit trailer `Task: <id>`)
+- [ ] Queries: `trace forward <REQ-id>` and `trace back <file|commit>`
+- [ ] Context resolver v2: walk graph edges from the task instead of listing docs by hand
+
+**Done when:** "Why does this code exist?" answers with commit → task → design → PRD → original request.
+
+### M3.7 Obsidian (§20)
+- [ ] Also emit relationships as `[[wikilinks]]` in a generated "Relations" section so Obsidian's graph shows them
+- [ ] Keep the repo fully usable without Obsidian (the validator and indexer read frontmatter, not wikilinks)
+
+### M3.8 Change impact analysis (§37)
+- [ ] `impact <doc-id>` = reverse graph walk → affected docs, tasks, files
+- [ ] The workflow engine runs it automatically before a change request is approved and puts the result in the approval request
+
+**Done when:** changing a PRD shows the list of affected designs, APIs, tests, and code before you approve.
+
+---
+
+## V4 — Autonomous Software Factory (§41)
+**Goal:** many projects running concurrently, with strict boundaries.
+
+Do these in order of real pain, not in list order.
+
+- [ ] **Multiple workers:** concurrency limits per worker/project; re-evaluate Redis here
+- [ ] **Docker-per-task sandboxes:** filesystem and network boundaries, secrets injected per task (§34)
+- [ ] **Multiple models + routing (§32):** add a second `Agent` implementation; route by a simple rule table (task type → model)
+- [ ] **Cost tracking & budgets:** per-project token/cost totals, and budget caps that pause work
+- [ ] **Advanced scheduling:** priorities, dependency-aware ordering, fair share across projects
+- [ ] **Learning system (§23):** `learning_candidates` table → human review → promote to `stacks/` or `global/` (always gated)
+- [ ] **Observability (§36):** a small web dashboard, or Grafana over Postgres; failures, retries, durations, costs
+- [ ] **Automated knowledge indexing:** reindex on push via webhook
+- [ ] **Advanced policy engine:** only if the YAML map from M1.3 becomes unmanageable
+- [ ] *(defer)* vector search. Only if graph + folder scoping demonstrably fails to find context
+
+---
+
+## Cross-cutting (start early, keep going)
+
+### Security (§34)
+- [ ] Separate tokens for owner, Hermes, and each worker; per-token scopes
+- [ ] Secrets never go into `CONTEXT.md` or agent logs; scrub logs
+- [ ] Protected branches on the remote (GitHub/GitLab) as a second line of defense
+- [ ] Production deploy credentials are never available to workers without an approved gate
+
+### Backups (§25)
+- [ ] Knowledge repo: push to 2 remotes + a scheduled local mirror
+- [ ] Postgres: nightly `pg_dump` with retention
+- [ ] **Restore drill:** restore both into a fresh environment, once a quarter. Add it to your calendar
+
+### Testing
+- [ ] Unit tests for the state machine, policy, context isolation, and validator (the logic that must not break)
+- [ ] One end-to-end test for the V1 demo, using a fake agent that writes a known file
+
+---
+
+## Milestone summary
+
+| # | Milestone | Demo |
+|---|-----------|------|
+| M0 | Foundations | Stack runs, knowledge folder opens in Obsidian |
+| M1.1–1.3 | Data, API, approvals | Task moves through states; gate blocks until approved |
+| M1.4–1.6 | Git, context, worker | Crash-safe worker in isolated worktrees |
+| M1.7 | Coding agent | **V1: task → code → tests → merge approval** |
+| M2 | Hermes + notifications | **V2: run it all from your phone** |
+| M3.1–3.4 | Contracts, validation, workflows | **PRD → design → tasks pipeline with gates** |
+| M3.5–3.8 | Roles, graph, impact | **V3: traceability + impact analysis** |
+| V4 | Factory | Multiple projects in parallel, within budget |

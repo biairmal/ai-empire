@@ -1,0 +1,14 @@
+# Go
+/bin/
+*.exe
+*.test
+*.out
+
+# Local config / secrets
+.env
+
+# Task worktrees (M1.4)
+/workspaces/
+
+# Obsidian local state
+.obsidian/
