@@ -1,0 +1,12 @@
+DROP TABLE IF EXISTS audit_log;
+DROP FUNCTION IF EXISTS audit_log_append_only();
+DROP TABLE IF EXISTS approval_decisions;
+DROP TABLE IF EXISTS approval_requests;
+DROP TABLE IF EXISTS agent_runs;
+DROP TABLE IF EXISTS task_dependencies;
+DROP TABLE IF EXISTS tasks;
+DROP TABLE IF EXISTS workers;
+DROP TABLE IF EXISTS projects;
+DROP TYPE IF EXISTS autonomy_level;
+DROP TYPE IF EXISTS approval_status;
+DROP TYPE IF EXISTS task_status;

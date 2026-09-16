@@ -49,73 +49,73 @@ Derived from [AI_SOFTWARE_DEV_EMPIRE.md](AI_SOFTWARE_DEV_EMPIRE.md). `§N` point
 **Goal:** human creates a task → one worker executes it autonomously under controlled authority.
 
 ### M1.1 Data model (§31)
-- [ ] `projects` (id, slug, name, repo_url, default_branch, stack, autonomy_level)
-- [ ] `tasks` (id, project_id, title, description, status, required_capabilities, created_at, updated_at)
-- [ ] `task_dependencies` (task_id, depends_on_task_id)
-- [ ] `workers` (id, name, capabilities, last_heartbeat_at, status)
-- [ ] `agent_runs` (id, task_id, worker_id, model, started_at, finished_at, exit_status, log_path, tokens, cost)
-- [ ] `approval_requests` (id, project_id, subject_type, subject_ref, subject_version, gate, status, requested_by, created_at)
-- [ ] `approval_decisions` (id, approval_request_id, decision, comment, decided_by, decided_at)
-- [ ] `audit_log` (id, actor_type, actor_id, action, target, payload jsonb, created_at). Append-only, enforced with a DB rule or trigger
-- [ ] Task status is a Postgres enum with the 9 states from §30
-- [ ] Approval status is an enum: `PENDING_APPROVAL, APPROVED, CHANGES_REQUESTED, REJECTED` (§8)
+- [x] `projects` (id, slug, name, repo_url, default_branch, stack, autonomy_level)
+- [x] `tasks` (id, project_id, title, description, status, required_capabilities, created_at, updated_at)
+- [x] `task_dependencies` (task_id, depends_on_task_id)
+- [x] `workers` (id, name, capabilities, last_heartbeat_at, status)
+- [x] `agent_runs` (id, task_id, worker_id, model, started_at, finished_at, exit_status, log_path, tokens, cost)
+- [x] `approval_requests` (id, project_id, subject_type, subject_ref, subject_version, gate, status, requested_by, created_at)
+- [x] `approval_decisions` (id, approval_request_id, decision, comment, decided_by, decided_at)
+- [x] `audit_log` (id, actor_type, actor_id, action, target, payload jsonb, created_at). Append-only, enforced with a DB rule or trigger
+- [x] Task status is a Postgres enum with the 9 states from §30
+- [x] Approval status is an enum: `PENDING_APPROVAL, APPROVED, CHANGES_REQUESTED, REJECTED` (§8)
 
 **Done when:** migrations apply, and a single SQL insert/select smoke test passes for each table.
 
 ### M1.2 Control Plane API: projects & tasks (§6, §33)
-- [ ] HTTP server (stdlib `net/http` is enough) with a static API token for auth (§34)
-- [ ] `POST/GET /projects`, `GET /projects/{id}`
-- [ ] `POST/GET /tasks`, `GET /tasks/{id}`, `POST /tasks/{id}/cancel`, `POST /tasks/{id}/retry`
-- [ ] A task state machine in one function that rejects illegal transitions; add a table-driven test for it
-- [ ] Every mutating endpoint writes an `audit_log` row (§9 auditable actions)
-- [ ] Minimal CLI (`empire task create ...`) or plain `curl` examples in the README
+- [x] HTTP server (stdlib `net/http` is enough) with a static API token for auth (§34)
+- [x] `POST/GET /projects`, `GET /projects/{id}`
+- [x] `POST/GET /tasks`, `GET /tasks/{id}`, `POST /tasks/{id}/cancel`, `POST /tasks/{id}/retry`
+- [x] A task state machine in one function that rejects illegal transitions; add a table-driven test for it
+- [x] Every mutating endpoint writes an `audit_log` row (§9 auditable actions)
+- [x] Minimal CLI (`empire task create ...`), see [README.md](README.md)
 
 **Done when:** you can create a project and a task over HTTP, move it through legal states, and every action shows up in `audit_log`.
 
 ### M1.3 Approval gates & policy (§8, §10, §11)
-- [ ] `GET /approvals`, `GET /approvals/{id}`, `POST /approvals/{id}/approve|request-changes|reject`
-- [ ] Rule: the actor that requested an approval cannot decide it (§9, §26). Test it
-- [ ] Policy as a static per-project YAML/JSON map, `action → auto | approval`, with three presets: `high`, `medium`, `conservative` (§11)
-- [ ] One function `policy.Requires(project, action) bool`. Workers call it; they don't hardcode rules
-- [ ] Classify the §10 actions (low/medium/high). High-risk actions always require approval, whatever the preset
+- [x] `GET /approvals`, `GET /approvals/{id}`, `POST /approvals/{id}/approve|request-changes|reject`
+- [x] Rule: the actor that requested an approval cannot decide it (§9, §26). Test it
+- [x] Policy with three presets: `high`, `medium`, `conservative` (§11). Presets live in code ([internal/policy/policy.go](internal/policy/policy.go)); add per-project overrides when a project needs one
+- [x] One function `policy.Requires(project, action) bool`. Workers call it; they don't hardcode rules
+- [x] Classify the §10 actions (low/medium/high). High-risk actions always require approval, whatever the preset
 
 **Done when:** a task that hits a gated action moves to `WAITING_FOR_HUMAN`, and continues only after `approve`.
 
 ### M1.4 Git integration & workspace isolation (§24, §29)
-- [ ] Worker clones/fetches the project repo into `workspaces/<project>/_base`
-- [ ] Each task gets its own `git worktree` on branch `ai/<task-id>`
-- [ ] Clean up the worktree after the task reaches a terminal state
-- [ ] The agent process runs with the worktree as its cwd; no other project paths get mounted or passed in
+- [x] Worker clones/fetches the project repo into `workspaces/<project>/_base`
+- [x] Each task gets its own `git worktree` on branch `ai/<task-id>`
+- [x] Clean up the worktree after the task reaches a terminal state
+- [x] The agent process runs with the worktree as its cwd; no other project paths get mounted or passed in
 - [ ] *(defer)* Docker-per-task. Add it when a project needs toolchain isolation
 
 **Done when:** two tasks on the same repo run side by side in separate worktrees without touching each other.
 
 ### M1.5 Context loading, V1 version (§22)
-- [ ] Resolver input: task → project → stack
-- [ ] Output: a single `CONTEXT.md` written into the worktree, containing:
+- [x] Resolver input: task → project → stack
+- [x] Output: a single `.empire-context.md` written into the worktree (git-excluded), containing:
   `global/*` + `stacks/<project stack>/*` + `projects/<slug>/*` docs listed in task metadata
-- [ ] Hard rule: never include another project's folder or another stack's folder (§21). Test it
-- [ ] Log which files were included on the `agent_run`
+- [x] Hard rule: never include another project's folder or another stack's folder (§21). Test it
+- [x] Log which files were included on the `agent_run`
 
 **Done when:** a Go-stack task's context has no .NET or other-project content, and a test proves it.
 
 ### M1.6 Worker & scheduler (§27, §28, §30)
-- [ ] Worker binary: register → heartbeat loop → claim → prepare workspace → load context → run agent → validate → report → cleanup
-- [ ] Claiming: `SELECT ... FOR UPDATE SKIP LOCKED` in Postgres (no Redis needed for one worker)
-- [ ] Capability match: only claim tasks whose `required_capabilities ⊆ worker.capabilities`
-- [ ] Heartbeat every N seconds; the control plane marks workers stale after M missed beats and requeues their `RUNNING` tasks
-- [ ] Control-plane restart safety: all state lives in Postgres, and a restart just resumes
+- [x] Worker binary: register → heartbeat loop → claim → prepare workspace → load context → run agent → validate → report → cleanup
+- [x] Claiming: `SELECT ... FOR UPDATE SKIP LOCKED` in Postgres (no Redis needed for one worker)
+- [x] Capability match: only claim tasks whose `required_capabilities ⊆ worker.capabilities`
+- [x] Heartbeat every N seconds; the control plane marks workers stale after M missed beats and requeues their `RUNNING` tasks
+- [x] Control-plane restart safety: all state lives in Postgres, and a restart just resumes
 - [ ] *(defer)* Redis streams/queues. Add them when you have multiple workers and Postgres polling becomes a measured bottleneck
 
 **Done when:** you kill the worker mid-task, restart it, and the task gets requeued and finishes.
 
 ### M1.7 One AI coding agent (§32)
-- [ ] Put a small interface behind the agent call: `Run(ctx, worktree, prompt) (Result, error)`
-- [ ] First implementation: Claude Code headless (`claude -p ...`) or another CLI agent, restricted to the worktree
-- [ ] Capture stdout/stderr to a log file, plus exit code, duration, and tokens/cost if available → `agent_runs`
-- [ ] Post-run validation: run the project's test command (from project config) → `TESTING` → pass/fail
-- [ ] On success: commit to `ai/<task-id>`, push the branch, set the task to `WAITING_FOR_HUMAN` with a **merge** approval request
-- [ ] On approve: merge (or open a PR) → `COMPLETED`. The agent never merges to a protected branch itself (§10)
+- [x] Put a small interface behind the agent call: `Run(ctx, worktree, prompt) (Result, error)`
+- [x] First implementation: Claude Code headless (`claude -p ...`) or another CLI agent, restricted to the worktree
+- [x] Capture stdout/stderr to a log file, plus exit code, duration, and tokens/cost if available → `agent_runs`
+- [x] Post-run validation: run the project's test command (from project config) → `TESTING` → pass/fail
+- [x] On success: commit to `ai/<task-id>`, push the branch, set the task to `WAITING_FOR_HUMAN` with a **merge** approval request
+- [x] On approve: merge (or open a PR) → `COMPLETED`. The agent never merges to a protected branch itself (§10)
 
 **Done when (V1 goal):** `empire task create "add /health endpoint"` → the worker implements it, tests pass, a merge approval appears → you approve → the change is merged. Full trail in `audit_log`.
 
@@ -244,8 +244,8 @@ Do these in order of real pain, not in list order.
 - [ ] **Restore drill:** restore both into a fresh environment, once a quarter. Add it to your calendar
 
 ### Testing
-- [ ] Unit tests for the state machine, policy, context isolation, and validator (the logic that must not break)
-- [ ] One end-to-end test for the V1 demo, using a fake agent that writes a known file
+- [x] Unit tests for the state machine, policy, context isolation (validator tests come with M3.2)
+- [x] One end-to-end test for the V1 demo, using a fake agent that writes a known file ([internal/worker/e2e_test.go](internal/worker/e2e_test.go))
 
 ---
 

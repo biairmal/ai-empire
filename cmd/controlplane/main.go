@@ -2,21 +2,67 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"time"
+
+	"aiempire/internal/controlplane"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func main() {
-	addr := os.Getenv("CP_ADDR")
-	if addr == "" {
-		addr = ":8080"
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+
+	stale, err := time.ParseDuration(env("EMPIRE_STALE_AFTER", "60s"))
+	if err != nil {
+		log.Fatalf("EMPIRE_STALE_AFTER: %v", err)
+	}
+	pool, err := pgxpool.New(ctx, env("DATABASE_URL", "postgres://empire:empire@localhost:5433/empire?sslmode=disable"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer pool.Close()
+	if err := pool.Ping(ctx); err != nil {
+		log.Fatalf("database: %v (is `make up` running?)", err)
 	}
 
-	http.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("ok"))
+	srv, err := controlplane.New(pool, controlplane.Config{
+		OwnerToken:   os.Getenv("EMPIRE_OWNER_TOKEN"),
+		WorkerToken:  os.Getenv("EMPIRE_WORKER_TOKEN"),
+		KnowledgeDir: env("EMPIRE_KNOWLEDGE_DIR", "knowledge"),
+		StaleAfter:   stale,
 	})
+	if err != nil {
+		log.Fatalf("config: %v (set EMPIRE_OWNER_TOKEN and EMPIRE_WORKER_TOKEN, see .env.example)", err)
+	}
+	go srv.RunReaper(ctx)
 
-	log.Printf("control plane listening on %s", addr)
-	log.Fatal(http.ListenAndServe(addr, nil))
+	hs := &http.Server{
+		Addr:              env("CP_ADDR", ":8080"),
+		Handler:           srv.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	go func() {
+		<-ctx.Done()
+		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		hs.Shutdown(shutdown)
+	}()
+	log.Printf("control plane listening on %s", hs.Addr)
+	if err := hs.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+		log.Fatal(err)
+	}
+}
+
+func env(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
 }
