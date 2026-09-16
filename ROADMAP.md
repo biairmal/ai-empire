@@ -123,44 +123,44 @@ Derived from [AI_SOFTWARE_DEV_EMPIRE.md](AI_SOFTWARE_DEV_EMPIRE.md). `§N` point
 Client → projects → repositories. A client (optional) is the confidentiality boundary. A project is a product (e.g. Guest Management), and its repositories are backend/frontend.
 
 **Data model**
-- [ ] Migration `000003`: `clients` (id, slug UNIQUE, name, default_autonomy_level, created_at)
-- [ ] `projects.client_id` FK, nullable (NULL = personal/internal project)
-- [ ] `repositories` (id, project_id FK, name, repo_url, default_branch, stack, test_command, created_at), `UNIQUE (project_id, name)`
-- [ ] Backfill: one repository per existing project from its current repo columns, named after the project slug
-- [ ] `tasks.repository_id` FK (NOT NULL after backfill), and it must belong to the task's project
-- [ ] Drop `repo_url`, `default_branch`, `stack`, `test_command` from `projects` (they move to `repositories`). `autonomy_level` stays per project
+- [x] Migration `000003`: `clients` (id, slug UNIQUE, name, default_autonomy_level, created_at)
+- [x] `projects.client_id` FK, nullable (NULL = personal/internal project)
+- [x] `repositories` (id, project_id FK, name, repo_url, default_branch, stack, test_command, created_at), `UNIQUE (project_id, name)`
+- [x] Backfill: one repository per existing project from its current repo columns, named after the project slug
+- [x] `tasks.repository_id` FK (NOT NULL after backfill), and it must belong to the task's project
+- [x] Drop `repo_url`, `default_branch`, `stack`, `test_command` from `projects` (they move to `repositories`). `autonomy_level` stays per project
 
 **API & CLI**
-- [ ] `POST /clients`, `GET /clients[/{id}]` (owner), audited
-- [ ] `POST /projects` takes an optional `client` (slug). A new project inherits the client's default autonomy unless one is given
-- [ ] `POST /projects/{id}/client` to move a project to another client or to none (owner only, audited, explicit)
-- [ ] `POST /projects/{id}/repositories`, `GET /projects/{id}/repositories` (owner), audited
-- [ ] `POST /tasks` takes `repository` (name). Required when the project has more than one repo; defaults to the only one otherwise
-- [ ] Task `required_capabilities` defaults to the repository's stack
-- [ ] Claim returns `{task, project, repository}`
-- [ ] Merge approval summary names the repository: `Merge ai/task-N into backend:main`
-- [ ] CLI: `empire client create -slug -name [-autonomy]`, `empire client list`, `empire project create -slug -name [-client C] [-autonomy]`, `empire project move P -client C|-none`, `empire repo add -project P -name N -repo URL -stack S [-branch] [-test]`, `empire repo list -project P`, `empire task create -project P -repo N …`
-- [ ] Project list shows the client; task list shows the repository
+- [x] `POST /clients`, `GET /clients[/{id}]` (owner), audited
+- [x] `POST /projects` takes an optional `client` (slug). A new project inherits the client's default autonomy unless one is given
+- [x] `POST /projects/{id}/client` to move a project to another client or to none (owner only, audited, explicit)
+- [x] `POST /projects/{id}/repositories`, `GET /projects/{id}/repositories` (owner), audited
+- [x] `POST /tasks` takes `repository` (name). Required when the project has more than one repo; defaults to the only one otherwise
+- [x] Task `required_capabilities` defaults to the repository's stack
+- [x] Claim returns `{task, project, repository}`
+- [x] Merge approval summary names the repository: `Merge ai/task-N into backend:main`
+- [x] CLI: `empire client create -slug -name [-autonomy]`, `empire client list`, `empire project create -slug -name [-client C] [-autonomy]`, `empire project move P -client C|-none`, `empire repo add -project P -name N -repo URL -stack S [-branch] [-test]`, `empire repo list -project P`, `empire task create -project P -repo N …`
+- [x] Project list shows the client; task list shows the repository
 
 **Worker & context**
-- [ ] Workspace layout: `workspaces/<project>/<repo>/_base` and `workspaces/<project>/<repo>/task-N`
-- [ ] The worker clones, tests, pushes, and merges using the repository's settings
-- [ ] Context resolver, in load order: `global/` → `stacks/<repository stack>/` → `clients/<project's client>/` (only if the project has a client) → the task's docs from `projects/<project slug>/`
-- [ ] Hard rule, with a test: never another client's folder, and no client folder at all for client-less projects
-- [ ] Knowledge folders stay flat: `knowledge/clients/<slug>/` next to `knowledge/projects/<slug>/`, so moving a project between clients never moves files
-- [ ] Add `knowledge/clients/README.md` and `knowledge/stacks/node/` (placeholder READMEs)
-- [ ] Update [knowledge/contracts/frontmatter.md](knowledge/contracts/frontmatter.md): add a `clients/<slug>/` → `client: <slug>` scope, and add client to the allowed-reference order (project → client → stack → global)
-- [ ] No repository knowledge scope: repo-specific knowledge stays in the repo (README, CLAUDE.md, docs/)
+- [x] Workspace layout: `workspaces/<project>/<repo>/_base` and `workspaces/<project>/<repo>/task-N`
+- [x] The worker clones, tests, pushes, and merges using the repository's settings
+- [x] Context resolver, in load order: `global/` → `stacks/<repository stack>/` → `clients/<project's client>/` (only if the project has a client) → the task's docs from `projects/<project slug>/`
+- [x] Hard rule, with a test: never another client's folder, and no client folder at all for client-less projects
+- [x] Knowledge folders stay flat: `knowledge/clients/<slug>/` next to `knowledge/projects/<slug>/`, so moving a project between clients never moves files
+- [x] Add `knowledge/clients/README.md` and `knowledge/stacks/node/` (placeholder READMEs)
+- [x] Update [knowledge/contracts/frontmatter.md](knowledge/contracts/frontmatter.md): add a `clients/<slug>/` → `client: <slug>` scope, and add client to the allowed-reference order (project → client → stack → global)
+- [x] No repository knowledge scope: repo-specific knowledge stays in the repo (README, CLAUDE.md, docs/)
 
 **Dependencies & gates (decided in §11A)**
-- [ ] Allow cross-project `depends_on`, as ordering only. Both projects must have the same client, or both have none; otherwise → 400
-- [ ] Cross-project dependencies never add the other project's knowledge to context. Test it
+- [x] Allow cross-project `depends_on`, as ordering only. Both projects must have the same client, or both have none; otherwise → 400
+- [x] Cross-project dependencies never add the other project's knowledge to context. Test it
 - [x] One merge gate per repository (already how it works). *(defer)* combined multi-repo approval until V3 workflows group tasks into features
 
 **Tests & docs**
-- [ ] E2E: one project with two repos (different stacks). A task in each repo merges only into its own repo, and the frontend task's context has no Go stack files
-- [ ] Unit test: two clients. A project of client A gets A's client knowledge and never B's; a client-less project gets none
-- [ ] Update [docs/database.md](docs/database.md), [docs/apps.md](docs/apps.md), [docs/README.md](docs/README.md)
+- [x] E2E: one project with two repos (different stacks). A task in each repo merges only into its own repo, and the frontend task's context has no Go stack files
+- [x] Unit test: two clients. A project of client A gets A's client knowledge and never B's; a client-less project gets none
+- [x] Update [docs/database.md](docs/database.md), [docs/apps.md](docs/apps.md), [docs/README.md](docs/README.md)
 
 **Prerequisite:** every repo needs a pushable remote. Create the GitHub repo for `guest-management-fe` before registering it.
 

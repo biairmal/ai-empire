@@ -21,12 +21,23 @@ type Bundle struct {
 
 var slugRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
 
-// Resolve builds a context bundle: global → stacks/<stack> → listed project docs.
-// Sibling stacks and other projects are never read (spec §21).
-func Resolve(root, stack, project string, docs []string) (Bundle, error) {
-	if !slugRe.MatchString(stack) || !slugRe.MatchString(project) {
-		return Bundle{}, fmt.Errorf("invalid stack %q or project %q", stack, project)
+// Scope says which knowledge a task may see.
+type Scope struct {
+	Stack   string   // from the task's repository
+	Client  string   // project's client slug; "" = no client knowledge at all
+	Project string   // project slug
+	Docs    []string // project-relative docs listed on the task
+}
+
+// Resolve builds a context bundle:
+// global → stacks/<stack> → clients/<client> → listed project docs.
+// Sibling stacks, other clients and other projects are never read (spec §11B, §21).
+func Resolve(root string, s Scope) (Bundle, error) {
+	if !slugRe.MatchString(s.Stack) || !slugRe.MatchString(s.Project) ||
+		(s.Client != "" && !slugRe.MatchString(s.Client)) {
+		return Bundle{}, fmt.Errorf("invalid scope stack=%q client=%q project=%q", s.Stack, s.Client, s.Project)
 	}
+	stack, project, docs := s.Stack, s.Project, s.Docs
 	var b Bundle
 	var sb strings.Builder
 	add := func(rel string, data []byte) {
@@ -34,7 +45,11 @@ func Resolve(root, stack, project string, docs []string) (Bundle, error) {
 		fmt.Fprintf(&sb, "## File: %s\n\n%s\n\n", rel, strings.TrimSpace(string(data)))
 	}
 
-	for _, dir := range []string{"global", "stacks/" + stack} {
+	dirs := []string{"global", "stacks/" + stack}
+	if s.Client != "" {
+		dirs = append(dirs, "clients/"+s.Client)
+	}
+	for _, dir := range dirs {
 		err := filepath.WalkDir(filepath.Join(root, dir), func(p string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return err

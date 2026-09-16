@@ -3,14 +3,32 @@ package api
 
 import "time"
 
+// Client is who the work is for: the confidentiality boundary (spec §11B).
+type Client struct {
+	ID                   int64     `json:"id" db:"id"`
+	Slug                 string    `json:"slug" db:"slug"`
+	Name                 string    `json:"name" db:"name"`
+	DefaultAutonomyLevel string    `json:"default_autonomy_level" db:"default_autonomy_level"`
+	CreatedAt            time.Time `json:"created_at" db:"created_at"`
+}
+
+// Project is a product; its code lives in one or more repositories (spec §11A).
 type Project struct {
 	ID            int64     `json:"id" db:"id"`
 	Slug          string    `json:"slug" db:"slug"`
 	Name          string    `json:"name" db:"name"`
+	ClientID      *int64    `json:"client_id" db:"client_id"` // nil = personal/internal
+	AutonomyLevel string    `json:"autonomy_level" db:"autonomy_level"`
+	CreatedAt     time.Time `json:"created_at" db:"created_at"`
+}
+
+type Repository struct {
+	ID            int64     `json:"id" db:"id"`
+	ProjectID     int64     `json:"project_id" db:"project_id"`
+	Name          string    `json:"name" db:"name"`
 	RepoURL       string    `json:"repo_url" db:"repo_url"`
 	DefaultBranch string    `json:"default_branch" db:"default_branch"`
 	Stack         string    `json:"stack" db:"stack"`
-	AutonomyLevel string    `json:"autonomy_level" db:"autonomy_level"`
 	TestCommand   string    `json:"test_command" db:"test_command"`
 	CreatedAt     time.Time `json:"created_at" db:"created_at"`
 }
@@ -18,6 +36,7 @@ type Project struct {
 type Task struct {
 	ID                   int64     `json:"id" db:"id"`
 	ProjectID            int64     `json:"project_id" db:"project_id"`
+	RepositoryID         int64     `json:"repository_id" db:"repository_id"`
 	Title                string    `json:"title" db:"title"`
 	Description          string    `json:"description" db:"description"`
 	Status               string    `json:"status" db:"status"`
@@ -80,8 +99,28 @@ type AuditEntry struct {
 
 // Request bodies.
 
+type CreateProject struct {
+	Slug          string `json:"slug"`
+	Name          string `json:"name"`
+	Client        string `json:"client,omitempty"`         // client slug; empty = personal
+	AutonomyLevel string `json:"autonomy_level,omitempty"` // empty = client default, else conservative
+}
+
+type MoveProject struct {
+	Client string `json:"client"` // client slug; empty = no client
+}
+
+type CreateRepository struct {
+	Name          string `json:"name"`
+	RepoURL       string `json:"repo_url"`
+	DefaultBranch string `json:"default_branch,omitempty"`
+	Stack         string `json:"stack"`
+	TestCommand   string `json:"test_command,omitempty"`
+}
+
 type CreateTask struct {
-	Project              string   `json:"project"` // slug
+	Project              string   `json:"project"`              // slug or id
+	Repository           string   `json:"repository,omitempty"` // name; optional if the project has one repo
 	Title                string   `json:"title"`
 	Description          string   `json:"description"`
 	RequiredCapabilities []string `json:"required_capabilities"`
@@ -109,8 +148,9 @@ type HeartbeatReply struct {
 }
 
 type Claim struct {
-	Task    Task    `json:"task"`
-	Project Project `json:"project"`
+	Task       Task       `json:"task"`
+	Project    Project    `json:"project"`
+	Repository Repository `json:"repository"`
 }
 
 type Transition struct {

@@ -26,9 +26,15 @@ The scope comes from the folder the document lives in, and the frontmatter must 
 |--------|-----|
 | `global/` | none |
 | `stacks/<stack>/` | `stack: <stack>` |
+| `clients/<slug>/` | `client: <slug>` |
 | `projects/<slug>/` | `project: <slug>` |
 
-A document may only reference documents in its own scope or a scope above it (project → stack → global), never a sibling scope (spec §21).
+A document may only reference documents in its own scope or a scope above it, never a sibling scope (spec §11B, §21):
+
+- a project doc may reference its own client, any stack, and global
+- a client doc may reference any stack and global
+- a stack doc may reference global
+- no doc may reference another client or another project
 
 ## Lifecycle (`status`)
 

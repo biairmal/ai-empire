@@ -2,7 +2,9 @@
 
 PostgreSQL 17 is the **single source of truth** for platform state (spec §31). Only the control plane connects to it. Workers and the CLI go through the HTTP API.
 
-- Schema source: [migrations/000002_core.up.sql](../migrations/000002_core.up.sql)
+- Schema source: [migrations/](../migrations/)
+  - `000002_core`: tasks, workers, approvals, audit
+  - `000003_clients_repositories`: clients and repositories
 - Connection (dev): `postgres://empire:empire@localhost:5433/empire`
 - Open a SQL shell: `docker compose exec postgres psql -U empire -d empire`
 
@@ -13,57 +15,62 @@ Source code, documents and knowledge are **not** in the database. They live in g
 ## 1. Entity relationship diagram
 
 ```text
-                        ┌──────────────────────┐
-                        │       projects       │
-                        │──────────────────────│
-                        │ id  PK               │
-                        │ slug  UNIQUE         │
-                        │ repo_url, stack      │
-                        │ autonomy_level       │
-                        └──────────┬───────────┘
-                     1 ┌───────────┴────────────┐ 1
-                       │                        │
-                     * ▼                        ▼ *
-┌──────────────────────────┐          ┌──────────────────────────┐
-│          tasks           │          │    approval_requests     │
-│──────────────────────────│          │──────────────────────────│
-│ id  PK                   │ 1      * │ id  PK                   │
-│ project_id  FK ──────────│◄─ ─ ─ ─ ─│ project_id  FK           │
-│ status  (task_status)    │ (by text │ subject_type = 'task'    │
-│ stage                    │  ref, no │ subject_ref  = task id   │
-│ worker_id  FK ───────┐   │   FK)    │ gate, status             │
-│ attempts, feedback   │   │          │ subject_version (sha)    │
-└──┬───────▲───────────┼───┘          └────────────┬─────────────┘
-   │ 1     │ 1         │ *                         │ 1
-   │       │           │                           │
-   │ *     │ *         ▼ 0..1                      ▼ *
-┌──┴───────┴──────┐  ┌─────────────────────┐  ┌──────────────────────────┐
-│task_dependencies│  │       workers       │  │   approval_decisions     │
-│─────────────────│  │─────────────────────│  │──────────────────────────│
-│ task_id    FK   │  │ id  PK              │  │ id  PK                   │
-│ depends_on FK   │  │ name  UNIQUE        │  │ approval_request_id  FK  │
-└─────────────────┘  │ capabilities[]      │  │ decision, comment        │
-                     │ status, heartbeat   │  │ decided_by               │
-                     └──────────┬──────────┘  └──────────────────────────┘
-   tasks 1                      │ 1
-     │                          │
-     │ *                        │ *
-┌────┴──────────────────────────┴──┐       ┌──────────────────────────┐
-│            agent_runs            │       │        audit_log         │
-│──────────────────────────────────│       │──────────────────────────│
-│ id  PK                           │       │ id  PK                   │
-│ task_id FK,  worker_id FK        │       │ actor_type, actor_id     │
-│ model, context_files[]           │       │ action, target (text)    │
-│ tokens, cost_usd, log_path       │       │ payload jsonb            │
-└──────────────────────────────────┘       │ APPEND-ONLY (trigger)    │
-                                           └──────────────────────────┘
-                                             (no FKs: references any
-                                              row as "task:1" etc.)
+┌────────────────────┐
+│      clients       │   (optional) the confidentiality boundary
+│────────────────────│
+│ id  PK, slug UNIQUE│
+│ default_autonomy   │
+└─────────┬──────────┘
+          │ 0..1
+          │
+          │ *
+┌─────────▼──────────┐ 1          * ┌──────────────────────────┐
+│      projects      │─────────────►│       repositories       │
+│────────────────────│              │──────────────────────────│
+│ id  PK, slug UNIQUE│              │ id  PK                   │
+│ client_id FK (null)│              │ project_id FK            │
+│ autonomy_level     │              │ name (unique in project) │
+└──┬──────────────┬──┘              │ repo_url, default_branch │
+   │ 1            │ 1               │ stack, test_command      │
+   │              │                 └────────────┬─────────────┘
+   │ *            │ *                            │ 1
+   │   ┌──────────▼───────────────┐              │
+   │   │    approval_requests     │              │ *
+   │   │──────────────────────────│  ┌───────────▼──────────────────┐
+   │   │ subject_type = 'task'    │  │            tasks             │
+   │   │ subject_ref  = task id ─ ┼ ►│──────────────────────────────│
+   │   │ gate, status             │  │ id  PK                       │
+   │   │ subject_version (sha)    │  │ project_id FK ─┐ composite FK│
+   │   └──────────┬───────────────┘  │ repository_id ─┘ (same proj.)│
+   │              │ 1                │ status, stage                │
+   │              │ *                │ worker_id FK (null)          │
+   │   ┌──────────▼───────────────┐  │ attempts, feedback           │
+   │   │   approval_decisions     │  └──┬────────▲────────┬─────────┘
+   │   │ decision, comment        │     │ 1      │ 1      │ 1
+   │   │ decided_by               │     │ *      │ *      │ *
+   │   └──────────────────────────┘  ┌──┴────────┴──┐  ┌──▼───────────────────┐
+   └──────────────────────────────►  │task_dependen-│  │      agent_runs      │
+          (projects 1 ── * tasks)    │cies          │  │ task_id, worker_id   │
+                                     │ task_id      │  │ model, context_files │
+┌─────────────────────┐              │ depends_on   │  │ tokens, cost_usd     │
+│       workers       │ 1        *   └──────────────┘  └──────────▲───────────┘
+│ id PK, name UNIQUE  │────────────────────────────────────────────┘
+│ capabilities[]      │  (also tasks.worker_id while in flight)
+│ status, heartbeat   │
+└─────────────────────┘
+
+┌──────────────────────────┐
+│        audit_log         │  append-only (trigger). No FKs: points at any row
+│ actor, action, target    │  as text, e.g. "task:1", "project:2", "client:3"
+│ payload jsonb            │
+└──────────────────────────┘
 ```
 
-**Why approvals link to tasks by text rather than a foreign key:** approval requests are meant to cover other subjects later (PRDs and designs in V3), so they point at their subject with `subject_type` + `subject_ref` instead of a `task_id` column.
+**The hierarchy:** client (optional) → projects → repositories → tasks. A task always belongs to **one project and one repository of that project**. The database enforces this with a composite foreign key `(repository_id, project_id) → repositories (id, project_id)`.
 
-Also present: `schema_migrations`, which golang-migrate manages. It records the current schema version (2).
+**Why approvals link to tasks by text rather than a foreign key:** approval requests are meant to cover other subjects later (PRDs and designs in V3), so they point at their subject with `subject_type` + `subject_ref`.
+
+Also present: `schema_migrations`, which golang-migrate manages. It records the current schema version (3).
 
 ---
 
@@ -87,7 +94,6 @@ These are enforced in [internal/task/state.go](../internal/task/state.go). Every
  PENDING ──► ASSIGNED ──► RUNNING ──► TESTING ──► WAITING_FOR_HUMAN ──► PENDING ─────────┘
     │           │           │  ▲         │                │
     │           │           │  └─────────┤                └──► CANCELLED
-    │           │           │            │
     │           ▼           ▼            ▼
     │        FAILED ◄───────┴────────────┤          COMPLETED  (only from RUNNING/TESTING/
     │           │                        │                      REVIEWING, and only in stage=merge)
@@ -106,38 +112,75 @@ Terminal states: `COMPLETED` and `CANCELLED`. `FAILED` isn't terminal; retry mov
 
 Legend for "Written by": **O** = owner via CLI/API, **W** = worker via API, **S** = system (the reaper inside the control plane).
 
-### `projects`
+**Slug rule** (clients and projects): lowercase `a-z0-9-`, starting with a letter or digit, and **containing at least one letter**. That lets every API path take either the slug or the numeric id (`/projects/guest` or `/projects/3`).
 
-A git repository the platform works on.
+### `clients`
+
+Who the work is for (spec §11B). Optional: personal projects have no client.
 
 | Column | Type | Notes |
 |--------|------|-------|
-| `id` | bigint PK | Auto-generated |
-| `slug` | text UNIQUE | Lowercase `a-z0-9-`. Used in folder names: `knowledge/projects/<slug>`, `workspaces/<slug>` |
+| `id` | bigint PK | |
+| `slug` | text UNIQUE | Also the knowledge folder: `knowledge/clients/<slug>/` |
+| `name` | text | |
+| `default_autonomy_level` | autonomy_level | Default `conservative`. New projects of this client start with it |
+| `created_at` | timestamptz | |
+
+Written by: **O** (`empire client create`).
+
+### `projects`
+
+A product (spec §11A). Its code lives in one or more repositories.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | bigint PK | |
+| `slug` | text UNIQUE | Used in `knowledge/projects/<slug>` and `workspaces/<slug>/…` |
 | `name` | text | Display name |
-| `repo_url` | text | Anything `git clone` accepts (URL or local path) |
+| `client_id` | FK → clients, nullable | `NULL` = personal/internal project |
+| `autonomy_level` | autonomy_level | Given at creation, or else the client's default, or else `conservative`. Moving the project to another client does **not** change it |
+| `created_at` | timestamptz | |
+
+Written by: **O** (`empire project create`; `empire project move` changes `client_id`).
+
+A move is refused when the project has task dependencies with a project that would then belong to a different client.
+
+### `repositories`
+
+A git repository of a project.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | bigint PK | |
+| `project_id` | FK → projects | |
+| `name` | text | `a-z0-9-`, unique within the project (e.g. `backend`, `frontend`) |
+| `repo_url` | text | Anything `git clone` accepts. **Must be pushable:** a remote or a bare repo, not a normal local repo with the branch checked out |
 | `default_branch` | text | Default `main`. Treated as the **protected** branch |
-| `stack` | text | e.g. `go`. Selects `knowledge/stacks/<stack>`, and is the default required capability for tasks |
-| `autonomy_level` | autonomy_level | Default `conservative` |
+| `stack` | text | e.g. `go`, `node`. Selects `knowledge/stacks/<stack>`, and is the default required capability for tasks |
 | `test_command` | text | Run in the worktree after the agent finishes, and again after the merge. Empty = skip |
 | `created_at` | timestamptz | |
 
-Written by: **O** (`empire project create`). There's no update or delete endpoint yet.
+Constraints: `UNIQUE (project_id, name)`, plus `UNIQUE (id, project_id)`, which is the target of the tasks composite FK.
+
+Written by: **O** (`empire repo add`). There's no update or delete endpoint yet.
+
+Migration 000003 converted each pre-existing project into a project with one repository named after the project slug.
 
 ### `tasks`
 
-One unit of work.
+One unit of work, in exactly one repository.
 
 | Column | Type | Notes |
 |--------|------|-------|
 | `id` | bigint PK | Also used in the branch name `ai/task-<id>` |
 | `project_id` | FK → projects | |
+| `repository_id` | bigint, NOT NULL | Must be a repository **of `project_id`** (composite FK) |
 | `title` | text, not empty | Also the commit message |
 | `description` | text | The request, sent to the agent |
 | `status` | task_status | Default `PENDING`. See transitions above |
 | `stage` | text | `implement` or `merge`: what the worker does on its next claim |
-| `required_capabilities` | text[] | A worker can claim only if its capabilities include all of these. Defaults to `[project.stack]` |
-| `context_docs` | text[] | Paths under `knowledge/projects/<slug>/` to give the agent |
+| `required_capabilities` | text[] | A worker can claim only if its capabilities include all of these. Defaults to `[repository.stack]` |
+| `context_docs` | text[] | Paths under `knowledge/projects/<project slug>/` to give the agent |
 | `feedback` | text | Your comment from the last "request changes". Added to the prompt |
 | `worker_id` | FK → workers, nullable | Set only while in-flight |
 | `attempts` | int | +1 on every claim. Reset by approve / request-changes / retry. At ≥3, a requeue fails the task |
@@ -148,7 +191,7 @@ Indexes: `tasks_claimable` (partial, `status = 'PENDING'`), `tasks_worker` (part
 
 | Column(s) | Written by |
 |-----------|------------|
-| new row | **O** `POST /tasks` |
+| new row | **O** `POST /tasks` (repository: by name, optional if the project has exactly one) |
 | `status` | **O** cancel/retry/decide, **W** claim/transition/authorize, **S** reaper |
 | `worker_id`, `attempts` | **W** claim (set), any move out of in-flight (cleared) |
 | `stage` | **W** authorize (when parking), **O** request-changes (back to `implement`) |
@@ -162,9 +205,11 @@ Indexes: `tasks_claimable` (partial, `status = 'PENDING'`), `tasks_worker` (part
 | Column | Type | Notes |
 |--------|------|-------|
 | `task_id` | FK → tasks (cascade delete) | The waiting task |
-| `depends_on_task_id` | FK → tasks | Must be in the **same project** (checked by the API) |
+| `depends_on_task_id` | FK → tasks | Any project, but **the same client** (or both client-less). Checked by the API |
 
 PK `(task_id, depends_on_task_id)`, and a task can't depend on itself. Written by: **O** (`empire task create -after ID`). The claim query skips tasks with any dependency not yet `COMPLETED`.
+
+Dependencies only order work. They never share knowledge between projects (spec §11A).
 
 ### `workers`
 
@@ -174,7 +219,7 @@ Execution processes.
 |--------|------|-------|
 | `id` | bigint PK | Sent by the worker as `X-Worker-ID` |
 | `name` | text UNIQUE | `EMPIRE_WORKER_NAME` (default: hostname). Re-registering with the same name reuses the row |
-| `capabilities` | text[] | `EMPIRE_WORKER_CAPS`, e.g. `{go}` |
+| `capabilities` | text[] | `EMPIRE_WORKER_CAPS`, e.g. `{go,node}` |
 | `status` | text | `online` / `offline` |
 | `last_heartbeat_at` | timestamptz | Updated every 10s |
 | `created_at` | timestamptz | |
@@ -203,7 +248,7 @@ Written by: **W** (`POST /tasks/{id}/runs`, then `POST /runs/{id}/finish`).
 
 ### `approval_requests`
 
-A gate waiting for (or already given) a human decision.
+A gate waiting for (or already given) a human decision. There is **one merge gate per repository** (spec §11A).
 
 | Column | Type | Notes |
 |--------|------|-------|
@@ -214,7 +259,7 @@ A gate waiting for (or already given) a human decision.
 | `subject_version` | text | For merges: the **exact commit sha** you're approving. The worker merges only this sha |
 | `gate` | text | The policy action, e.g. `merge_protected` |
 | `status` | approval_status | Default `PENDING_APPROVAL` |
-| `summary` | text | What you see in `empire approvals` (includes the diffstat) |
+| `summary` | text | What you see in `empire approvals`, e.g. `Merge ai/task-7 (abc123) into backend:main …` plus the diffstat |
 | `requested_by` | text | e.g. `worker:1`. This actor can never decide the request |
 | `created_at` | timestamptz | |
 
@@ -247,16 +292,19 @@ The append-only history of every state change.
 | `actor_type` | text | `owner`, `worker`, or `system` |
 | `actor_id` | text | `owner`, the worker id (e.g. `1`), or `system` |
 | `action` | text | See the table below |
-| `target` | text | `project:N`, `task:N`, `worker:N`, `approval:N` |
+| `target` | text | `client:N`, `project:N`, `task:N`, `worker:N`, `approval:N` |
 | `payload` | jsonb | Action-specific details |
 | `created_at` | timestamptz | |
 
-Triggers `audit_log_no_update_delete` and `audit_log_no_truncate` raise an error on any `UPDATE`, `DELETE`, or `TRUNCATE`. Every audit row is written **in the same transaction** as the change it describes, so a change without an audit row can't exist.
+Triggers `audit_log_no_update_delete` and `audit_log_no_truncate` raise an error on any `UPDATE`, `DELETE`, or `TRUNCATE`. Every audit row is written **in the same transaction** as the change it describes.
 
 | `action` | `target` | Written when | Payload |
 |----------|----------|--------------|---------|
-| `project.create` | project | Project created | full project |
-| `task.create` | task | Task created | full task, `depends_on` |
+| `client.create` | client | Client created | full client |
+| `project.create` | project | Project created | full project, `client` |
+| `project.move_client` | project | Project moved to another client or none | `from_client_id`, `to_client_id`, `to_client` |
+| `repository.create` | project | Repository added | full repository |
+| `task.create` | task | Task created | full task, `repository`, `depends_on` |
 | `task.status` | task | **Any** status change | `from`, `to`, plus `stage` / `error` / `reason` / `approval_id` |
 | `worker.register` | worker | Worker starts | full worker |
 | `worker.offline` | worker | Reaper found it silent | none |
@@ -271,18 +319,39 @@ Triggers `audit_log_no_update_delete` and `audit_log_no_truncate` raise an error
 ## 4. Useful queries
 
 ```sql
+-- The whole hierarchy
+SELECT coalesce(c.slug, '(personal)') AS client, p.slug AS project, r.name AS repo, r.stack, r.repo_url
+FROM projects p
+LEFT JOIN clients c ON c.id = p.client_id
+LEFT JOIN repositories r ON r.project_id = p.id
+ORDER BY 1, 2, 3;
+
 -- What is running right now?
-SELECT t.id, p.slug, t.status, t.stage, w.name AS worker, t.title
-FROM tasks t JOIN projects p ON p.id = t.project_id LEFT JOIN workers w ON w.id = t.worker_id
+SELECT t.id, p.slug || '/' || r.name AS repo, t.status, t.stage, w.name AS worker, t.title
+FROM tasks t
+JOIN projects p ON p.id = t.project_id
+JOIN repositories r ON r.id = t.repository_id
+LEFT JOIN workers w ON w.id = t.worker_id
 WHERE t.status IN ('ASSIGNED','RUNNING','TESTING','REVIEWING');
 
 -- What needs me?
 SELECT id, gate, subject_ref AS task, summary FROM approval_requests WHERE status = 'PENDING_APPROVAL';
 
--- Cost per project
-SELECT p.slug, count(r.*) AS runs, sum(r.tokens) AS tokens, sum(r.cost_usd) AS usd
-FROM agent_runs r JOIN tasks t ON t.id = r.task_id JOIN projects p ON p.id = t.project_id
-GROUP BY p.slug;
+-- What is blocked, and by what?
+SELECT d.task_id, t.title, d.depends_on_task_id, dt.status AS dependency_status
+FROM task_dependencies d
+JOIN tasks t ON t.id = d.task_id
+JOIN tasks dt ON dt.id = d.depends_on_task_id
+WHERE t.status = 'PENDING' AND dt.status <> 'COMPLETED';
+
+-- Cost per client and project
+SELECT coalesce(c.slug, '(personal)') AS client, p.slug AS project,
+       count(r.*) AS runs, sum(r.tokens) AS tokens, sum(r.cost_usd) AS usd
+FROM agent_runs r
+JOIN tasks t ON t.id = r.task_id
+JOIN projects p ON p.id = t.project_id
+LEFT JOIN clients c ON c.id = p.client_id
+GROUP BY 1, 2 ORDER BY 1, 2;
 
 -- Full history of one task
 SELECT created_at, actor_type, actor_id, action, payload FROM audit_log
@@ -299,7 +368,9 @@ SELECT id, title, attempts, last_error FROM tasks WHERE status = 'FAILED';
 
 ## 5. Changing the schema
 
-1. Add `migrations/000003_<name>.up.sql` and a matching `.down.sql`.
+1. Add `migrations/000004_<name>.up.sql` and a matching `.down.sql`.
 2. Run `make migrate` (or `make migrate-down` to roll back one step).
 3. If you added a column to a table, add the field to the struct in [internal/api/types.go](../internal/api/types.go). Queries use `SELECT *` and map columns by their `db:"…"` tag, so a column without a matching field causes a loud error.
 4. `make test` recreates the `empire_test` database from all migrations, so it checks the new migration too.
+
+Note: rolling back `000003` is lossy for projects with several repositories. Each project keeps only its first repository's settings.

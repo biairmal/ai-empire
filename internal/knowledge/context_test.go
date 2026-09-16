@@ -8,56 +8,85 @@ import (
 	"testing"
 )
 
-func TestResolveIsolation(t *testing.T) {
+func fixture(t *testing.T) string {
 	root := t.TempDir()
-	write := func(rel, body string) {
+	for rel, body := range map[string]string{
+		"global/principles.md":               "GLOBAL",
+		"global/README.md":                   "NAV",
+		"stacks/go/testing.md":               "GO-STACK",
+		"stacks/dotnet/efcore.md":            "DOTNET-STACK",
+		"clients/acme/conventions.md":        "ACME-CLIENT",
+		"clients/globex/conventions.md":      "GLOBEX-CLIENT",
+		"projects/alpha/requirements/prd.md": "ALPHA-PRD",
+		"projects/alpha/api/unlisted.md":     "ALPHA-UNLISTED",
+		"projects/beta/secret.md":            "BETA-SECRET",
+	} {
 		p := filepath.Join(root, rel)
 		os.MkdirAll(filepath.Dir(p), 0o755)
 		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
-	write("global/principles.md", "GLOBAL")
-	write("global/README.md", "NAV")
-	write("stacks/go/testing.md", "GO-STACK")
-	write("stacks/dotnet/efcore.md", "DOTNET-STACK")
-	write("projects/alpha/requirements/prd.md", "ALPHA-PRD")
-	write("projects/alpha/api/unlisted.md", "ALPHA-UNLISTED")
-	write("projects/beta/secret.md", "BETA-SECRET")
+	return root
+}
 
-	b, err := Resolve(root, "go", "alpha", []string{"requirements/prd.md"})
-	if err != nil {
-		t.Fatal(err)
+func check(t *testing.T, b Bundle, wantFiles, mustHave, mustNot []string) {
+	t.Helper()
+	if !slices.Equal(b.Files, wantFiles) {
+		t.Errorf("files = %v, want %v", b.Files, wantFiles)
 	}
-	want := []string{"global/principles.md", "stacks/go/testing.md", "projects/alpha/requirements/prd.md"}
-	if !slices.Equal(b.Files, want) {
-		t.Errorf("files = %v, want %v", b.Files, want)
-	}
-	for _, s := range []string{"GLOBAL", "GO-STACK", "ALPHA-PRD"} {
+	for _, s := range mustHave {
 		if !strings.Contains(b.Content, s) {
 			t.Errorf("content missing %s", s)
 		}
 	}
-	for _, s := range []string{"NAV", "DOTNET-STACK", "ALPHA-UNLISTED", "BETA-SECRET"} {
+	for _, s := range mustNot {
 		if strings.Contains(b.Content, s) {
 			t.Errorf("content leaked %s", s)
 		}
 	}
+}
 
-	for _, doc := range []string{"../beta/secret.md", filepath.Join(root, "projects/beta/secret.md"), "requirements/missing.md", "notes.txt"} {
-		if _, err := Resolve(root, "go", "alpha", []string{doc}); err == nil {
+func TestResolveIsolation(t *testing.T) {
+	root := fixture(t)
+
+	b, err := Resolve(root, Scope{Stack: "go", Client: "acme", Project: "alpha", Docs: []string{"requirements/prd.md"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	check(t, b,
+		[]string{"global/principles.md", "stacks/go/testing.md", "clients/acme/conventions.md", "projects/alpha/requirements/prd.md"},
+		[]string{"GLOBAL", "GO-STACK", "ACME-CLIENT", "ALPHA-PRD"},
+		[]string{"NAV", "DOTNET-STACK", "GLOBEX-CLIENT", "ALPHA-UNLISTED", "BETA-SECRET"})
+
+	// A client-less project gets no client knowledge at all.
+	b, err = Resolve(root, Scope{Stack: "dotnet", Project: "alpha"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	check(t, b,
+		[]string{"global/principles.md", "stacks/dotnet/efcore.md"},
+		[]string{"DOTNET-STACK"},
+		[]string{"GO-STACK", "ACME-CLIENT", "GLOBEX-CLIENT", "ALPHA-PRD"})
+
+	for _, doc := range []string{"../beta/secret.md", filepath.Join(root, "projects/beta/secret.md"), "requirements/missing.md", "notes.txt", "../../clients/globex/conventions.md"} {
+		if _, err := Resolve(root, Scope{Stack: "go", Project: "alpha", Docs: []string{doc}}); err == nil {
 			t.Errorf("doc %q: expected error", doc)
 		}
 	}
-	for _, bad := range [][2]string{{"../x", "alpha"}, {"go", "../beta"}} {
-		if _, err := Resolve(root, bad[0], bad[1], nil); err == nil {
-			t.Errorf("stack/project %v: expected error", bad)
+	for _, bad := range []Scope{
+		{Stack: "../x", Project: "alpha"},
+		{Stack: "go", Project: "../beta"},
+		{Stack: "go", Project: "alpha", Client: "../globex"},
+	} {
+		if _, err := Resolve(root, bad); err == nil {
+			t.Errorf("scope %+v: expected error", bad)
 		}
 	}
 }
 
-func TestResolveMissingStackIsFine(t *testing.T) {
-	b, err := Resolve(t.TempDir(), "rust", "alpha", nil)
+func TestResolveMissingFoldersAreFine(t *testing.T) {
+	b, err := Resolve(t.TempDir(), Scope{Stack: "rust", Client: "newco", Project: "alpha"})
 	if err != nil || len(b.Files) != 0 {
 		t.Fatalf("got %v, %v", b, err)
 	}

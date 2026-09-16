@@ -85,9 +85,18 @@ func (s *Server) Handler() http.Handler {
 
 	h := func(pattern string, rl role, fn apiFunc) { mux.Handle(pattern, s.wrap(rl, fn)) }
 
+	// {ref} = slug or numeric id
+	h("POST /clients", ownerOnly, s.createClient)
+	h("GET /clients", anyone, s.listClients)
+	h("GET /clients/{ref}", anyone, s.getClient)
+
 	h("POST /projects", ownerOnly, s.createProject)
 	h("GET /projects", anyone, s.listProjects)
-	h("GET /projects/{id}", anyone, s.getProject)
+	h("GET /projects/{ref}", anyone, s.getProject)
+	h("POST /projects/{ref}/client", ownerOnly, s.moveProject)
+	h("POST /projects/{ref}/repositories", ownerOnly, s.createRepository)
+	h("GET /projects/{ref}/repositories", anyone, s.listProjectRepositories)
+	h("GET /repositories", anyone, s.listRepositories)
 
 	h("POST /tasks", ownerOnly, s.createTask)
 	h("GET /tasks", anyone, s.listTasks)
@@ -213,9 +222,13 @@ func audit(ctx context.Context, tx pgx.Tx, a actor, action, target string, paylo
 	return err
 }
 
-func collect[T any](ctx context.Context, q interface {
+// querier is satisfied by both the pool and a transaction.
+type querier interface {
 	Query(context.Context, string, ...any) (pgx.Rows, error)
-}, sql string, args ...any) ([]T, error) {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func collect[T any](ctx context.Context, q querier, sql string, args ...any) ([]T, error) {
 	rows, err := q.Query(ctx, sql, args...)
 	if err != nil {
 		return nil, err
@@ -223,9 +236,7 @@ func collect[T any](ctx context.Context, q interface {
 	return pgx.CollectRows(rows, pgx.RowToStructByName[T])
 }
 
-func one[T any](ctx context.Context, q interface {
-	Query(context.Context, string, ...any) (pgx.Rows, error)
-}, sql string, args ...any) (T, error) {
+func one[T any](ctx context.Context, q querier, sql string, args ...any) (T, error) {
 	rows, err := q.Query(ctx, sql, args...)
 	if err != nil {
 		var zero T

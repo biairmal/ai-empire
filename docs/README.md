@@ -27,9 +27,10 @@ For what's planned next, see [ROADMAP.md](../ROADMAP.md). For the full vision, s
              │  HTTP + worker token
              │  (claim, report, ask permission)
 ┌────────────┴─────────────┐        ┌───────────────────────────┐
-│  WORKER                  │  git   │  Project repo (remote)    │
+│  WORKER                  │  git   │  Repositories (remotes)   │
 │  bin/worker              │◄──────►│  main  +  ai/task-N       │
-│  - clones repo           │        └───────────────────────────┘
+│  - clones each repo      │        │  (one per project repo)   │
+│                          │        └───────────────────────────┘
 │  - one worktree per task │
 │  - runs the agent        │──► claude -p   (edits files only)
 │  - runs tests, commits,  │
@@ -49,9 +50,9 @@ For what's planned next, see [ROADMAP.md](../ROADMAP.md). For the full vision, s
 
 | Piece | What it is |
 |-------|------------|
-| PostgreSQL | Runs in Docker (`make up`). Holds projects, tasks, workers, approvals, runs, and the audit log. |
+| PostgreSQL | Runs in Docker (`make up`). Holds clients, projects, repositories, tasks, workers, approvals, runs, and the audit log. |
 | `migrate` | A one-shot Docker container (`make migrate`) that applies `migrations/*.sql`. |
-| `knowledge/` | Markdown files. Rules and project docs that get fed to the agent. |
+| `knowledge/` | Markdown files. Global, stack, client, and project knowledge that gets fed to the agent. |
 | `workspaces/` | The worker's scratch area: repo clones, task worktrees, agent logs. Git ignores it and it's safe to delete. |
 
 ---
@@ -60,8 +61,10 @@ For what's planned next, see [ROADMAP.md](../ROADMAP.md). For the full vision, s
 
 | Term | Meaning |
 |------|---------|
-| **Project** | A git repo the platform works on, plus settings: stack (`go`), test command, autonomy level. |
-| **Task** | One unit of work on a project ("add /health endpoint"). Has a **status** and a **stage**. |
+| **Client** | Optional. Who the work is for, and the confidentiality boundary: its knowledge only reaches its own projects. Has a default autonomy level. |
+| **Project** | A product (e.g. Guest Management). Belongs to at most one client, has an autonomy level, and has one or more repositories. Project docs are shared by all its repositories. |
+| **Repository** | One git repo of a project (e.g. `backend`, `frontend`), with its own URL, protected branch, **stack** (`go`, `node`) and test command. |
+| **Task** | One unit of work in **one repository** of a project ("add /health endpoint"). Has a **status** and a **stage**. Can wait for other tasks (`-after`), even in other projects of the same client. |
 | **Status** | Where the task is in its lifecycle: `PENDING`, `RUNNING`, `WAITING_FOR_HUMAN`, `COMPLETED`, … (9 in total). |
 | **Stage** | What the worker should do next time it picks the task up: `implement` (write code) or `merge` (merge the approved code). |
 | **Worker** | A process that executes tasks. It registers itself by name and sends a heartbeat every 10s. |
@@ -72,6 +75,30 @@ For what's planned next, see [ROADMAP.md](../ROADMAP.md). For the full vision, s
 | **Decision** | Your answer to a gate: approve, request changes (with a comment), or reject. |
 | **Audit log** | An append-only history of everything that happened, and who did it. |
 | **Context bundle** | `.empire-context.md`: the knowledge files the agent is allowed to see for this task. |
+
+### How work is organized
+
+```text
+client (optional)          acme                              (none = personal)
+  └── project              ├── guest                          └── go-sdk
+        └── repository     │     ├── backend   (go)                 └── go-sdk (go)
+              └── task     │     └── frontend  (node)
+                           └── shop
+                                 └── app       (go)
+```
+
+What knowledge a task gets (built by the control plane, in this order):
+
+```text
+knowledge/global/                      always
+knowledge/stacks/<repository stack>/   frontend task → stacks/node, never stacks/go
+knowledge/clients/<project's client>/  only for that client's projects
+knowledge/projects/<project>/<doc>     only the docs listed on the task (-doc)
+```
+
+Repository-specific knowledge lives in the repository itself (README, CLAUDE.md, docs/); the agent reads it in its worktree.
+
+A feature that spans repositories is one task per repository, chained with `-after`. You approve each repository's merge separately, and a task only starts once the tasks it depends on are merged. A chain may cross projects, but never clients.
 
 ---
 
@@ -150,7 +177,8 @@ This is what happened in the real demo run, step by step, with the database rows
 
 | | You (owner token) | Worker (worker token) | Agent (Claude) |
 |---|---|---|---|
-| Create projects / tasks | ✅ | ❌ | ❌ |
+| Create clients / projects / repositories / tasks | ✅ | ❌ | ❌ |
+| Move a project to another client | ✅ | ❌ | ❌ |
 | Cancel / retry tasks | ✅ | ❌ | ❌ |
 | Approve / reject gates | ✅ | ❌ | ❌ |
 | Claim tasks, report status | ❌ | ✅ (only tasks it holds) | ❌ |
@@ -218,7 +246,10 @@ make build           # build bin/controlplane, bin/worker, bin/empire
 make run-cp          # terminal 1
 make run-worker      # terminal 2 (EMPIRE_AGENT=fake for a free dry run)
 
-empire task list                    # what exists
+empire client list                  # clients
+empire project list                 # projects, their client and repositories
+empire repo list -project guest     # one project's repositories
+empire task list                    # tasks, shown as project/repo
 empire workers                      # who is alive
 empire approvals                    # what needs you
 empire task get 1                   # full detail: runs, cost, approvals
@@ -267,5 +298,7 @@ AI Empire/
 - All workers share one token, and a worker's identity (`X-Worker-ID`) is self-declared.
 - A worker runs one task at a time, and there's no per-project lock for running tasks in parallel on one machine.
 - Cancelling a task closes its open gates as `REJECTED` without writing an `approval_decisions` row.
+- Clients, projects and repositories can be created (and projects moved), but not renamed or deleted yet.
+- A feature spanning repositories gets one merge gate per repository. A combined all-or-nothing approval is deferred to V3.
 - No web UI, notifications, or Hermes yet (that's V2).
 - No document contracts, workflow engine, or knowledge graph yet (that's V3).

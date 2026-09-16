@@ -151,7 +151,7 @@ func (w *Worker) Step(ctx context.Context) (bool, error) {
 		w.mu.Unlock()
 	}()
 
-	err := w.execute(tctx, cl.Task, cl.Project)
+	err := w.execute(tctx, *cl)
 	switch {
 	case err == nil:
 		log.Printf("task %d: stage %s done", t.ID, t.Stage)
@@ -168,32 +168,36 @@ func (w *Worker) Step(ctx context.Context) (bool, error) {
 	return true, nil
 }
 
-func (w *Worker) execute(ctx context.Context, t api.Task, p api.Project) error {
+func (w *Worker) execute(ctx context.Context, cl api.Claim) error {
+	t, repo := cl.Task, cl.Repository
 	if err := w.transition(ctx, t.ID, task.Running, ""); err != nil {
 		return err
 	}
-	base := filepath.Join(w.cfg.Workspaces, p.Slug, "_base")
-	if err := ensureBase(ctx, base, p.RepoURL); err != nil {
+	// One clone per repository; worktrees per task (spec §11A, §29).
+	repoDir := filepath.Join(w.cfg.Workspaces, cl.Project.Slug, repo.Name)
+	base := filepath.Join(repoDir, "_base")
+	if err := ensureBase(ctx, base, repo.RepoURL); err != nil {
 		return err
 	}
-	dir := filepath.Join(w.cfg.Workspaces, p.Slug, fmt.Sprintf("task-%d", t.ID))
+	dir := filepath.Join(repoDir, fmt.Sprintf("task-%d", t.ID))
 	defer removeWorktree(context.WithoutCancel(ctx), base, dir)
 
 	switch t.Stage {
 	case task.StageImplement:
-		return w.implement(ctx, t, p, base, dir)
+		return w.implement(ctx, cl, base, dir)
 	case task.StageMerge:
-		return w.merge(ctx, t, p, base, dir)
+		return w.merge(ctx, cl, base, dir)
 	}
 	return fmt.Errorf("unknown stage %q", t.Stage)
 }
 
 func branchName(t api.Task) string { return fmt.Sprintf("ai/task-%d", t.ID) }
 
-func (w *Worker) implement(ctx context.Context, t api.Task, p api.Project, base, dir string) error {
+func (w *Worker) implement(ctx context.Context, cl api.Claim, base, dir string) error {
+	t, repo := cl.Task, cl.Repository
 	branch := branchName(t)
 	// Rework after "request changes" continues from the previously pushed branch.
-	start := "origin/" + p.DefaultBranch
+	start := "origin/" + repo.DefaultBranch
 	if refExists(ctx, base, "refs/remotes/origin/"+branch) {
 		start = "origin/" + branch
 	}
@@ -213,14 +217,14 @@ func (w *Worker) implement(ctx context.Context, t api.Task, p api.Project, base,
 		return err
 	}
 
-	if err := w.runAgent(ctx, t, p, dir, bundle.Files); err != nil {
+	if err := w.runAgent(ctx, cl, dir, bundle.Files); err != nil {
 		return err
 	}
 
 	if err := w.transition(ctx, t.ID, task.Testing, ""); err != nil {
 		return err
 	}
-	if err := w.test(ctx, t, p, dir); err != nil {
+	if err := w.test(ctx, t, repo, dir); err != nil {
 		return err
 	}
 
@@ -249,9 +253,9 @@ func (w *Worker) implement(ctx context.Context, t api.Task, p api.Project, base,
 		return err
 	}
 
-	diffstat, _ := git(ctx, dir, "diff", "--stat", "origin/"+p.DefaultBranch+"..."+head)
-	summary := fmt.Sprintf("Merge %s (%s) into %s for task #%d: %s\n\n%s",
-		branch, head[:min(12, len(head))], p.DefaultBranch, t.ID, t.Title, diffstat)
+	diffstat, _ := git(ctx, dir, "diff", "--stat", "origin/"+repo.DefaultBranch+"..."+head)
+	summary := fmt.Sprintf("Merge %s (%s) into %s:%s for task #%d: %s\n\n%s",
+		branch, head[:min(12, len(head))], repo.Name, repo.DefaultBranch, t.ID, t.Title, diffstat)
 	ok, _, err := w.authorize(ctx, t, policy.MergeProtected, task.StageMerge, summary, head)
 	if err != nil {
 		return err
@@ -262,7 +266,8 @@ func (w *Worker) implement(ctx context.Context, t api.Task, p api.Project, base,
 	return errParked
 }
 
-func (w *Worker) merge(ctx context.Context, t api.Task, p api.Project, base, dir string) error {
+func (w *Worker) merge(ctx context.Context, cl api.Claim, base, dir string) error {
+	t, repo := cl.Task, cl.Repository
 	ok, sha, err := w.authorize(ctx, t, policy.MergeProtected, task.StageMerge, "", "")
 	if err != nil || !ok {
 		return orParked(err)
@@ -270,7 +275,7 @@ func (w *Worker) merge(ctx context.Context, t api.Task, p api.Project, base, dir
 	if sha == "" {
 		return errors.New("approval has no commit to merge")
 	}
-	if err := addWorktree(ctx, base, dir, "origin/"+p.DefaultBranch, "--detach"); err != nil {
+	if err := addWorktree(ctx, base, dir, "origin/"+repo.DefaultBranch, "--detach"); err != nil {
 		return err
 	}
 
@@ -284,16 +289,17 @@ func (w *Worker) merge(ctx context.Context, t api.Task, p api.Project, base, dir
 	if err := w.transition(ctx, t.ID, task.Testing, ""); err != nil {
 		return err
 	}
-	if err := w.test(ctx, t, p, dir); err != nil {
+	if err := w.test(ctx, t, repo, dir); err != nil {
 		return fmt.Errorf("tests failed after merge: %w", err)
 	}
-	if _, err := git(ctx, dir, "push", "origin", "HEAD:refs/heads/"+p.DefaultBranch); err != nil {
+	if _, err := git(ctx, dir, "push", "origin", "HEAD:refs/heads/"+repo.DefaultBranch); err != nil {
 		return err
 	}
 	return w.transition(ctx, t.ID, task.Completed, "")
 }
 
-func (w *Worker) runAgent(ctx context.Context, t api.Task, p api.Project, dir string, files []string) error {
+func (w *Worker) runAgent(ctx context.Context, cl api.Claim, dir string, files []string) error {
+	t := cl.Task
 	var run api.ID
 	err := w.c.Do(ctx, "POST", fmt.Sprintf("/tasks/%d/runs", t.ID),
 		api.StartRun{Model: w.cfg.Agent.Name(), ContextFiles: files}, &run)
@@ -307,7 +313,7 @@ func (w *Worker) runAgent(ctx context.Context, t api.Task, p api.Project, dir st
 	if err != nil {
 		return err
 	}
-	res, runErr := w.cfg.Agent.Run(ctx, dir, prompt(t, p), f)
+	res, runErr := w.cfg.Agent.Run(ctx, dir, prompt(cl), f)
 	f.Close()
 
 	finish := api.FinishRun{ExitStatus: res.ExitStatus, LogPath: logPath, Tokens: res.Tokens, CostUSD: res.CostUSD}
@@ -320,11 +326,11 @@ func (w *Worker) runAgent(ctx context.Context, t api.Task, p api.Project, dir st
 	return nil
 }
 
-func (w *Worker) test(ctx context.Context, t api.Task, p api.Project, dir string) error {
-	if p.TestCommand == "" {
+func (w *Worker) test(ctx context.Context, t api.Task, repo api.Repository, dir string) error {
+	if repo.TestCommand == "" {
 		return nil
 	}
-	out, err := shell(ctx, dir, p.TestCommand)
+	out, err := shell(ctx, dir, repo.TestCommand)
 	if err != nil {
 		return fmt.Errorf("tests failed: %w", err)
 	}
@@ -352,10 +358,11 @@ func orParked(err error) error {
 	return errParked
 }
 
-func prompt(t api.Task, p api.Project) string {
+func prompt(cl api.Claim) string {
+	t, p, repo := cl.Task, cl.Project, cl.Repository
 	var b strings.Builder
 	fmt.Fprintf(&b, "Task #%d: %s\n\n", t.ID, t.Title)
-	fmt.Fprintf(&b, "You are the Developer agent for project %q (stack: %s).\n\n", p.Name, p.Stack)
+	fmt.Fprintf(&b, "You are the Developer agent for project %q, repository %q (stack: %s).\n\n", p.Name, repo.Name, repo.Stack)
 	if t.Description != "" {
 		fmt.Fprintf(&b, "## Request\n\n%s\n\n", t.Description)
 	}

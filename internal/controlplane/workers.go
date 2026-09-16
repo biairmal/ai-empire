@@ -126,7 +126,11 @@ func (s *Server) claim(r *http.Request, a actor) (any, error) {
 			return err
 		}
 		p, err := one[api.Project](ctx, tx, `SELECT * FROM projects WHERE id = $1`, t.ProjectID)
-		out = &api.Claim{Task: t, Project: p}
+		if err != nil {
+			return err
+		}
+		repo, err := one[api.Repository](ctx, tx, `SELECT * FROM repositories WHERE id = $1`, t.RepositoryID)
+		out = &api.Claim{Task: t, Project: p, Repository: repo}
 		return err
 	})
 	if err != nil || out == nil {
@@ -253,20 +257,19 @@ func (s *Server) authorize(r *http.Request, a actor) (any, error) {
 }
 
 func (s *Server) taskContext(r *http.Request, a actor) (any, error) {
-	var t api.Task
-	var p api.Project
+	var scope knowledge.Scope
 	err := s.tx(r.Context(), func(tx pgx.Tx) error {
-		var err error
-		if t, err = lockOwnTask(r.Context(), tx, r, a); err != nil {
+		t, err := lockOwnTask(r.Context(), tx, r, a)
+		if err != nil {
 			return err
 		}
-		p, err = one[api.Project](r.Context(), tx, `SELECT * FROM projects WHERE id = $1`, t.ProjectID)
+		scope, err = scopeFor(r.Context(), tx, t.ProjectID, t.RepositoryID, t.ContextDocs)
 		return err
 	})
 	if err != nil {
 		return nil, err
 	}
-	b, err := knowledge.Resolve(s.cfg.KnowledgeDir, p.Stack, p.Slug, t.ContextDocs)
+	b, err := knowledge.Resolve(s.cfg.KnowledgeDir, scope)
 	if err != nil {
 		return nil, errf(http.StatusUnprocessableEntity, "context: %v", err)
 	}

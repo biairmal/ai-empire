@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"net/url"
@@ -17,10 +18,15 @@ import (
 
 const usage = `usage: empire <command> [flags] [args]
 
-  project create -slug S -name N -repo URL -stack go [-branch main] [-autonomy conservative|medium|high] [-test CMD]
+  client create -slug S -name N [-autonomy conservative|medium|high]
+  client list
+  project create -slug S -name N [-client C] [-autonomy conservative|medium|high]
   project list
-  task create -project S [-desc TEXT] [-doc PATH]... [-cap CAP]... [-after ID]... TITLE...
-  task list [-status S] [-project-id N]
+  project move PROJECT -client C | -none
+  repo add -project P -name N -repo URL -stack go [-branch main] [-test CMD]
+  repo list [-project P]
+  task create -project P [-repo NAME] [-desc TEXT] [-doc PATH]... [-cap CAP]... [-after ID]... TITLE...
+  task list [-status S] [-project P]
   task get ID
   task cancel ID
   task retry ID
@@ -57,7 +63,7 @@ func main() {
 
 func dispatch(ctx context.Context, c *client.Client, args []string) error {
 	cmd := args[0]
-	if (cmd == "project" || cmd == "task") && len(args) > 1 {
+	if (cmd == "client" || cmd == "project" || cmd == "repo" || cmd == "task") && len(args) > 1 {
 		cmd, args = cmd+" "+args[1], args[1:]
 	}
 	fs := flag.NewFlagSet(cmd, flag.ExitOnError)
@@ -66,29 +72,118 @@ func dispatch(ctx context.Context, c *client.Client, args []string) error {
 	post := func(path string, in, out any) error { return c.Do(ctx, "POST", path, in, out) }
 
 	switch cmd {
-	case "project create":
-		p := api.Project{}
-		fs.StringVar(&p.Slug, "slug", "", "")
-		fs.StringVar(&p.Name, "name", "", "")
-		fs.StringVar(&p.RepoURL, "repo", "", "")
-		fs.StringVar(&p.Stack, "stack", "", "")
-		fs.StringVar(&p.DefaultBranch, "branch", "main", "")
-		fs.StringVar(&p.AutonomyLevel, "autonomy", "conservative", "")
-		fs.StringVar(&p.TestCommand, "test", "", "")
+	case "client create":
+		var in api.Client
+		fs.StringVar(&in.Slug, "slug", "", "")
+		fs.StringVar(&in.Name, "name", "", "")
+		fs.StringVar(&in.DefaultAutonomyLevel, "autonomy", "", "")
 		fs.Parse(args[1:])
-		var out api.Project
-		if err := post("/projects", p, &out); err != nil {
+		var out api.Client
+		if err := post("/clients", in, &out); err != nil {
 			return err
 		}
 		return show(out)
 
-	case "project list":
-		var ps []api.Project
-		if err := get("/projects", &ps); err != nil {
+	case "client list":
+		var cs []api.Client
+		if err := get("/clients", &cs); err != nil {
 			return err
 		}
-		return table("ID\tSLUG\tSTACK\tAUTONOMY\tREPO", ps, func(p api.Project) string {
-			return fmt.Sprintf("%d\t%s\t%s\t%s\t%s", p.ID, p.Slug, p.Stack, p.AutonomyLevel, p.RepoURL)
+		return table("ID\tSLUG\tNAME\tDEFAULT AUTONOMY", cs, func(c api.Client) string {
+			return fmt.Sprintf("%d\t%s\t%s\t%s", c.ID, c.Slug, c.Name, c.DefaultAutonomyLevel)
+		})
+
+	case "project create":
+		var in api.CreateProject
+		fs.StringVar(&in.Slug, "slug", "", "")
+		fs.StringVar(&in.Name, "name", "", "")
+		fs.StringVar(&in.Client, "client", "", "")
+		fs.StringVar(&in.AutonomyLevel, "autonomy", "", "")
+		fs.Parse(args[1:])
+		var out api.Project
+		if err := post("/projects", in, &out); err != nil {
+			return err
+		}
+		fmt.Printf("created project %s (id %d, autonomy %s). Next: empire repo add -project %s ...\n",
+			out.Slug, out.ID, out.AutonomyLevel, out.Slug)
+		return nil
+
+	case "project list":
+		var ps []api.Project
+		var cs []api.Client
+		var rs []api.Repository
+		if err := errors.Join(get("/projects", &ps), get("/clients", &cs), get("/repositories", &rs)); err != nil {
+			return err
+		}
+		clients := map[int64]string{}
+		for _, c := range cs {
+			clients[c.ID] = c.Slug
+		}
+		repos := map[int64][]string{}
+		for _, r := range rs {
+			repos[r.ProjectID] = append(repos[r.ProjectID], r.Name+"("+r.Stack+")")
+		}
+		return table("ID\tSLUG\tCLIENT\tAUTONOMY\tREPOSITORIES", ps, func(p api.Project) string {
+			client := "-"
+			if p.ClientID != nil {
+				client = clients[*p.ClientID]
+			}
+			return fmt.Sprintf("%d\t%s\t%s\t%s\t%s", p.ID, p.Slug, client, p.AutonomyLevel, strings.Join(repos[p.ID], ", "))
+		})
+
+	case "project move":
+		if len(args) < 2 {
+			return errors.New("usage: empire project move PROJECT -client C | -none")
+		}
+		var in api.MoveProject
+		fs.StringVar(&in.Client, "client", "", "")
+		none := fs.Bool("none", false, "")
+		fs.Parse(args[2:])
+		if (in.Client == "") == !*none {
+			return errors.New("give exactly one of -client C or -none")
+		}
+		var out api.Project
+		if err := post("/projects/"+url.PathEscape(args[1])+"/client", in, &out); err != nil {
+			return err
+		}
+		to := in.Client
+		if to == "" {
+			to = "(no client)"
+		}
+		fmt.Printf("moved project %s to %s (autonomy unchanged: %s)\n", out.Slug, to, out.AutonomyLevel)
+		return nil
+
+	case "repo add":
+		var in api.CreateRepository
+		project := fs.String("project", "", "")
+		fs.StringVar(&in.Name, "name", "", "")
+		fs.StringVar(&in.RepoURL, "repo", "", "")
+		fs.StringVar(&in.Stack, "stack", "", "")
+		fs.StringVar(&in.DefaultBranch, "branch", "", "")
+		fs.StringVar(&in.TestCommand, "test", "", "")
+		fs.Parse(args[1:])
+		if *project == "" {
+			return errors.New("-project is required")
+		}
+		var out api.Repository
+		if err := post("/projects/"+url.PathEscape(*project)+"/repositories", in, &out); err != nil {
+			return err
+		}
+		return show(out)
+
+	case "repo list":
+		project := fs.String("project", "", "")
+		fs.Parse(args[1:])
+		path := "/repositories"
+		if *project != "" {
+			path = "/projects/" + url.PathEscape(*project) + "/repositories"
+		}
+		var rs []api.Repository
+		if err := get(path, &rs); err != nil {
+			return err
+		}
+		return table("ID\tPROJECT\tNAME\tSTACK\tBRANCH\tTEST\tURL", rs, func(r api.Repository) string {
+			return fmt.Sprintf("%d\t%d\t%s\t%s\t%s\t%s\t%s", r.ID, r.ProjectID, r.Name, r.Stack, r.DefaultBranch, r.TestCommand, r.RepoURL)
 		})
 
 	case "task create":
@@ -96,6 +191,7 @@ func dispatch(ctx context.Context, c *client.Client, args []string) error {
 		var docs, caps list
 		var after []int64
 		fs.StringVar(&in.Project, "project", "", "")
+		fs.StringVar(&in.Repository, "repo", "", "")
 		fs.StringVar(&in.Description, "desc", "", "")
 		fs.Var(&docs, "doc", "")
 		fs.Var(&caps, "cap", "")
@@ -117,15 +213,32 @@ func dispatch(ctx context.Context, c *client.Client, args []string) error {
 
 	case "task list":
 		status := fs.String("status", "", "")
-		pid := fs.String("project-id", "", "")
+		project := fs.String("project", "", "slug or id")
 		fs.Parse(args[1:])
-		q := url.Values{"status": {*status}, "project_id": {*pid}}
+		q := url.Values{"status": {*status}}
+		if *project != "" {
+			var p api.Project
+			if err := get("/projects/"+url.PathEscape(*project), &p); err != nil {
+				return err
+			}
+			q.Set("project_id", fmt.Sprint(p.ID))
+		}
 		var ts []api.Task
-		if err := get("/tasks?"+q.Encode(), &ts); err != nil {
+		var ps []api.Project
+		var rs []api.Repository
+		if err := errors.Join(get("/tasks?"+q.Encode(), &ts), get("/projects", &ps), get("/repositories", &rs)); err != nil {
 			return err
 		}
-		return table("ID\tPROJECT\tSTATUS\tSTAGE\tTRIES\tTITLE", ts, func(t api.Task) string {
-			return fmt.Sprintf("%d\t%d\t%s\t%s\t%d\t%s", t.ID, t.ProjectID, t.Status, t.Stage, t.Attempts, t.Title)
+		projects := map[int64]string{}
+		for _, p := range ps {
+			projects[p.ID] = p.Slug
+		}
+		repos := map[int64]string{}
+		for _, r := range rs {
+			repos[r.ID] = r.Name
+		}
+		return table("ID\tPROJECT/REPO\tSTATUS\tSTAGE\tTRIES\tTITLE", ts, func(t api.Task) string {
+			return fmt.Sprintf("%d\t%s/%s\t%s\t%s\t%d\t%s", t.ID, projects[t.ProjectID], repos[t.RepositoryID], t.Status, t.Stage, t.Attempts, t.Title)
 		})
 
 	case "task get":

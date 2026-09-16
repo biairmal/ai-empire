@@ -13,47 +13,6 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-func (s *Server) createProject(r *http.Request, a actor) (any, error) {
-	var p api.Project
-	if err := decode(r, &p); err != nil {
-		return nil, err
-	}
-	if p.Slug == "" || p.Name == "" || p.RepoURL == "" || p.Stack == "" {
-		return nil, errf(http.StatusBadRequest, "slug, name, repo_url and stack are required")
-	}
-	if p.DefaultBranch == "" {
-		p.DefaultBranch = "main"
-	}
-	if p.AutonomyLevel == "" {
-		p.AutonomyLevel = "conservative"
-	}
-	var out api.Project
-	err := s.tx(r.Context(), func(tx pgx.Tx) error {
-		var err error
-		out, err = one[api.Project](r.Context(), tx, `
-			INSERT INTO projects (slug, name, repo_url, default_branch, stack, autonomy_level, test_command)
-			VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-			p.Slug, p.Name, p.RepoURL, p.DefaultBranch, p.Stack, p.AutonomyLevel, p.TestCommand)
-		if err != nil {
-			return err
-		}
-		return audit(r.Context(), tx, a, "project.create", projectRef(out.ID), M{"project": out})
-	})
-	return out, err
-}
-
-func (s *Server) listProjects(r *http.Request, a actor) (any, error) {
-	return collect[api.Project](r.Context(), s.db, `SELECT * FROM projects ORDER BY id`)
-}
-
-func (s *Server) getProject(r *http.Request, a actor) (any, error) {
-	id, err := pathID(r)
-	if err != nil {
-		return nil, err
-	}
-	return one[api.Project](r.Context(), s.db, `SELECT * FROM projects WHERE id = $1`, id)
-}
-
 func (s *Server) createTask(r *http.Request, a actor) (any, error) {
 	var in api.CreateTask
 	if err := decode(r, &in); err != nil {
@@ -62,48 +21,83 @@ func (s *Server) createTask(r *http.Request, a actor) (any, error) {
 	if in.Title == "" {
 		return nil, errf(http.StatusBadRequest, "title is required")
 	}
-	p, err := one[api.Project](r.Context(), s.db, `SELECT * FROM projects WHERE slug = $1`, in.Project)
-	if err != nil {
-		return nil, errf(http.StatusBadRequest, "unknown project %q", in.Project)
-	}
-	// Fail early on docs the worker won't be able to load.
-	if _, err := knowledge.Resolve(s.cfg.KnowledgeDir, p.Stack, p.Slug, in.ContextDocs); err != nil {
-		return nil, errf(http.StatusBadRequest, "context: %v", err)
-	}
-	caps := in.RequiredCapabilities
-	if len(caps) == 0 {
-		caps = []string{p.Stack}
-	}
 	docs := in.ContextDocs
 	if docs == nil {
 		docs = []string{}
 	}
 
 	var out api.Task
-	err = s.tx(r.Context(), func(tx pgx.Tx) error {
-		var err error
-		out, err = one[api.Task](r.Context(), tx, `
-			INSERT INTO tasks (project_id, title, description, required_capabilities, context_docs)
-			VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-			p.ID, in.Title, in.Description, caps, docs)
+	err := s.tx(r.Context(), func(tx pgx.Tx) error {
+		ctx := r.Context()
+		p, err := projectByRef(ctx, tx, in.Project)
+		if err != nil {
+			return errf(http.StatusBadRequest, "unknown project %q", in.Project)
+		}
+		repo, err := pickRepository(ctx, tx, p, in.Repository)
+		if err != nil {
+			return err
+		}
+		// Fail early on docs the worker won't be able to load.
+		scope, err := scopeFor(ctx, tx, p.ID, repo.ID, docs)
+		if err != nil {
+			return err
+		}
+		if _, err := knowledge.Resolve(s.cfg.KnowledgeDir, scope); err != nil {
+			return errf(http.StatusBadRequest, "context: %v", err)
+		}
+		caps := in.RequiredCapabilities
+		if len(caps) == 0 {
+			caps = []string{repo.Stack}
+		}
+
+		out, err = one[api.Task](ctx, tx, `
+			INSERT INTO tasks (project_id, repository_id, title, description, required_capabilities, context_docs)
+			VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+			p.ID, repo.ID, in.Title, in.Description, caps, docs)
 		if err != nil {
 			return err
 		}
 		for _, dep := range in.DependsOn {
-			// Same-project only: dependencies must not bridge isolated projects.
-			tag, err := tx.Exec(r.Context(), `
+			// Any project, but only within the same client (or both client-less):
+			// a dependency orders work, it must never link two clients (spec §11A).
+			tag, err := tx.Exec(ctx, `
 				INSERT INTO task_dependencies (task_id, depends_on_task_id)
-				SELECT $1, id FROM tasks WHERE id = $2 AND project_id = $3`, out.ID, dep, p.ID)
+				SELECT $1, t.id FROM tasks t JOIN projects dp ON dp.id = t.project_id
+				WHERE t.id = $2 AND dp.client_id IS NOT DISTINCT FROM $3`, out.ID, dep, p.ClientID)
 			if err != nil {
 				return err
 			}
 			if tag.RowsAffected() == 0 {
-				return errf(http.StatusBadRequest, "dependency %d not found in project %s", dep, p.Slug)
+				return errf(http.StatusBadRequest, "dependency %d not found, or it belongs to a different client", dep)
 			}
 		}
-		return audit(r.Context(), tx, a, "task.create", taskRef(out.ID), M{"task": out, "depends_on": in.DependsOn})
+		return audit(ctx, tx, a, "task.create", taskRef(out.ID),
+			M{"task": out, "repository": repo.Name, "depends_on": in.DependsOn})
 	})
 	return out, err
+}
+
+// pickRepository resolves the task's repository by name; it may be omitted
+// only when the project has exactly one.
+func pickRepository(ctx context.Context, q querier, p api.Project, name string) (api.Repository, error) {
+	repos, err := collect[api.Repository](ctx, q, `SELECT * FROM repositories WHERE project_id = $1 ORDER BY id`, p.ID)
+	if err != nil {
+		return api.Repository{}, err
+	}
+	var names []string
+	for _, r := range repos {
+		if r.Name == name || (name == "" && len(repos) == 1) {
+			return r, nil
+		}
+		names = append(names, r.Name)
+	}
+	switch {
+	case len(repos) == 0:
+		return api.Repository{}, errf(http.StatusBadRequest, "project %s has no repositories; add one first", p.Slug)
+	case name == "":
+		return api.Repository{}, errf(http.StatusBadRequest, "project %s has several repositories, pick one of %v", p.Slug, names)
+	}
+	return api.Repository{}, errf(http.StatusBadRequest, "project %s has no repository %q (have %v)", p.Slug, name, names)
 }
 
 func (s *Server) listTasks(r *http.Request, a actor) (any, error) {
@@ -199,3 +193,4 @@ func move(ctx context.Context, tx pgx.Tx, a actor, t api.Task, to string, note M
 
 func taskRef(id int64) string    { return "task:" + strconv.FormatInt(id, 10) }
 func projectRef(id int64) string { return "project:" + strconv.FormatInt(id, 10) }
+func clientRef(id int64) string  { return "client:" + strconv.FormatInt(id, 10) }

@@ -37,15 +37,7 @@ func TestV1EndToEnd(t *testing.T) {
 	pool := freshDB(t, ctx, dbURL)
 	tmp := t.TempDir()
 
-	// Remote repo with one commit on main.
-	origin := filepath.Join(tmp, "origin.git")
-	mustGit(t, tmp, "init", "--bare", "-b", "main", origin)
-	seed := filepath.Join(tmp, "seed")
-	mustGit(t, tmp, "clone", origin, seed)
-	os.WriteFile(filepath.Join(seed, "README.md"), []byte("demo\n"), 0o644)
-	mustGit(t, seed, "add", ".")
-	mustGit(t, seed, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "init")
-	mustGit(t, seed, "push", "origin", "HEAD:main")
+	origin := newRemote(t, tmp, "origin")
 
 	// Knowledge repo.
 	kdir := filepath.Join(tmp, "knowledge")
@@ -63,14 +55,13 @@ func TestV1EndToEnd(t *testing.T) {
 	defer hs.Close()
 	owner := client.New(hs.URL, "owner-t")
 
-	testCmd := "cat empire-fake-agent.txt"
-	if runtime.GOOS == "windows" {
-		testCmd = "type empire-fake-agent.txt"
-	}
 	var proj api.Project
-	do(t, owner, "POST", "/projects", api.Project{
-		Slug: "demo", Name: "Demo", RepoURL: origin, Stack: "go", AutonomyLevel: "high", TestCommand: testCmd,
-	}, &proj)
+	do(t, owner, "POST", "/projects", api.CreateProject{Slug: "demo", Name: "Demo", AutonomyLevel: "high"}, &proj)
+	// No repository yet → tasks are refused.
+	expectStatus(t, owner, "POST", "/tasks", api.CreateTask{Project: "demo", Title: "x"}, 400)
+	do(t, owner, "POST", "/projects/demo/repositories", api.CreateRepository{
+		Name: "app", RepoURL: origin, Stack: "go", TestCommand: testCmd(),
+	}, nil)
 
 	var t1 api.Task
 	do(t, owner, "POST", "/tasks", api.CreateTask{
@@ -193,6 +184,173 @@ func TestV1EndToEnd(t *testing.T) {
 	if decisions != 2 {
 		t.Errorf("decisions = %d", decisions)
 	}
+}
+
+// M1.8: clients, multi-repo projects, cross-project dependencies (spec §11A, §11B).
+func TestClientsAndRepositories(t *testing.T) {
+	dbURL := os.Getenv("EMPIRE_TEST_DATABASE_URL")
+	if dbURL == "" {
+		t.Skip("EMPIRE_TEST_DATABASE_URL not set")
+	}
+	ctx := context.Background()
+	pool := freshDB(t, ctx, dbURL)
+	tmp := t.TempDir()
+	sdkGit, beGit, feGit, otherGit := newRemote(t, tmp, "sdk"), newRemote(t, tmp, "be"), newRemote(t, tmp, "fe"), newRemote(t, tmp, "other")
+
+	kdir := filepath.Join(tmp, "knowledge")
+	writeFile(t, kdir, "global/principles.md", "GLOBAL")
+	writeFile(t, kdir, "stacks/go/go.md", "GO-STACK")
+	writeFile(t, kdir, "stacks/node/node.md", "NODE-STACK")
+	writeFile(t, kdir, "clients/acme/conventions.md", "ACME-CLIENT")
+	writeFile(t, kdir, "clients/globex/conventions.md", "GLOBEX-CLIENT")
+	writeFile(t, kdir, "projects/guest/requirements/prd.md", "GUEST-PRD")
+
+	srv, err := controlplane.New(pool, controlplane.Config{
+		OwnerToken: "owner-t", WorkerToken: "worker-t", KnowledgeDir: kdir, StaleAfter: time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hs := httptest.NewServer(srv.Handler())
+	defer hs.Close()
+	owner := client.New(hs.URL, "owner-t")
+
+	do(t, owner, "POST", "/clients", api.Client{Slug: "acme", Name: "Acme", DefaultAutonomyLevel: "medium"}, nil)
+	do(t, owner, "POST", "/clients", api.Client{Slug: "globex", Name: "Globex"}, nil)
+	expectStatus(t, owner, "POST", "/clients", api.Client{Slug: "123", Name: "digits only"}, 400)
+
+	var guest api.Project
+	do(t, owner, "POST", "/projects", api.CreateProject{Slug: "guest", Name: "Guest", Client: "acme"}, &guest)
+	if guest.AutonomyLevel != "medium" || guest.ClientID == nil {
+		t.Fatalf("guest = %+v, want acme's default autonomy", guest)
+	}
+	do(t, owner, "POST", "/projects", api.CreateProject{Slug: "sdk", Name: "SDK", Client: "acme"}, nil)
+	do(t, owner, "POST", "/projects", api.CreateProject{Slug: "other", Name: "Other", Client: "globex"}, nil)
+	do(t, owner, "POST", "/projects", api.CreateProject{Slug: "mine", Name: "Mine"}, nil)
+	expectStatus(t, owner, "POST", "/projects", api.CreateProject{Slug: "x", Name: "X", Client: "nobody"}, 400)
+
+	repo := func(project, name, url, stack string) {
+		t.Helper()
+		do(t, owner, "POST", "/projects/"+project+"/repositories", api.CreateRepository{
+			Name: name, RepoURL: url, Stack: stack, TestCommand: testCmd(),
+		}, nil)
+	}
+	repo("guest", "backend", beGit, "go")
+	repo("guest", "frontend", feGit, "node")
+	repo("sdk", "sdk", sdkGit, "go")
+	repo("other", "other", otherGit, "go")
+	repo("mine", "mine", otherGit, "go")
+	expectStatus(t, owner, "POST", "/projects/guest/repositories", api.CreateRepository{Name: "backend", RepoURL: "x", Stack: "go"}, 409)
+
+	// Repository choice.
+	expectStatus(t, owner, "POST", "/tasks", api.CreateTask{Project: "guest", Title: "which repo?"}, 400)
+	expectStatus(t, owner, "POST", "/tasks", api.CreateTask{Project: "guest", Repository: "nope", Title: "x"}, 400)
+
+	// Chain across projects within one client: sdk → backend → frontend.
+	var s1, b1, f1 api.Task
+	do(t, owner, "POST", "/tasks", api.CreateTask{Project: "sdk", Title: "QR token helper"}, &s1)
+	do(t, owner, "POST", "/tasks", api.CreateTask{Project: "guest", Repository: "backend", Title: "QR endpoint", DependsOn: []int64{s1.ID}}, &b1)
+	do(t, owner, "POST", "/tasks", api.CreateTask{
+		Project: "guest", Repository: "frontend", Title: "QR scanner", DependsOn: []int64{b1.ID},
+		ContextDocs: []string{"requirements/prd.md"},
+	}, &f1)
+	if f1.RequiredCapabilities[0] != "node" {
+		t.Errorf("frontend caps = %v, want repository stack", f1.RequiredCapabilities)
+	}
+	// Never across clients, and never from a client project into a personal one.
+	expectStatus(t, owner, "POST", "/tasks", api.CreateTask{Project: "other", Title: "x", DependsOn: []int64{s1.ID}}, 400)
+	expectStatus(t, owner, "POST", "/tasks", api.CreateTask{Project: "mine", Title: "x", DependsOn: []int64{s1.ID}}, 400)
+
+	w, err := worker.New(client.New(hs.URL, "worker-t"), worker.Config{
+		Name: "w", Capabilities: []string{"go", "node"}, Workspaces: filepath.Join(tmp, "ws"), Agent: worker.Fake{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Register(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tk := range []struct {
+		task    api.Task
+		gateFor string
+	}{{s1, "sdk:main"}, {b1, "backend:main"}, {f1, "frontend:main"}} {
+		step(t, w, true)  // implement → gate
+		step(t, w, false) // dependents stay blocked while this one waits
+		var pending []api.ApprovalRequest
+		do(t, owner, "GET", "/approvals?status=PENDING_APPROVAL", nil, &pending)
+		if len(pending) != 1 || pending[0].SubjectRef != strconv.FormatInt(tk.task.ID, 10) || !strings.Contains(pending[0].Summary, tk.gateFor) {
+			t.Fatalf("pending approvals = %+v, want one for task %d into %s", pending, tk.task.ID, tk.gateFor)
+		}
+		do(t, owner, "POST", "/approvals/"+strconv.FormatInt(pending[0].ID, 10)+"/approve", api.Decision{}, nil)
+		step(t, w, true) // merge
+		if s := taskDetail(t, owner, tk.task.ID).Task.Status; s != task.Completed {
+			t.Fatalf("task %d: %s", tk.task.ID, s)
+		}
+	}
+
+	// Each change landed only in its own repository.
+	for _, remote := range []string{sdkGit, beGit, feGit} {
+		out, err := exec.Command("git", "--git-dir", remote, "show", "main:empire-fake-agent.txt").Output()
+		if err != nil || strings.Count(string(out), "\n") != 1 {
+			t.Errorf("%s main = %q, %v", remote, out, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(tmp, "ws", "guest", "backend", "_base")); err != nil {
+		t.Errorf("workspace layout: %v", err)
+	}
+
+	// Frontend context: node stack + acme + its doc; never Go or another client.
+	runs := taskDetail(t, owner, f1.ID).Runs
+	want := []string{"global/principles.md", "stacks/node/node.md", "clients/acme/conventions.md", "projects/guest/requirements/prd.md"}
+	if len(runs) != 1 || !slices.Equal(runs[0].ContextFiles, want) {
+		t.Errorf("frontend context = %v, want %v", runs, want)
+	}
+	backendFiles := taskDetail(t, owner, b1.ID).Runs[0].ContextFiles
+	if !slices.Contains(backendFiles, "stacks/go/go.md") || slices.Contains(backendFiles, "stacks/node/node.md") {
+		t.Errorf("backend context = %v", backendFiles)
+	}
+
+	// Moving projects between clients must not split a dependency chain.
+	expectStatus(t, owner, "POST", "/projects/sdk/client", api.MoveProject{Client: "globex"}, 409)
+	expectStatus(t, owner, "POST", "/projects/guest/client", api.MoveProject{}, 409)
+	var moved api.Project
+	do(t, owner, "POST", "/projects/other/client", api.MoveProject{Client: "acme"}, &moved)
+	if moved.ClientID == nil || *moved.ClientID != *guest.ClientID || moved.AutonomyLevel != "conservative" {
+		t.Errorf("moved = %+v", moved)
+	}
+	do(t, owner, "POST", "/projects/mine/client", api.MoveProject{Client: "globex"}, nil)
+	var entries []api.AuditEntry
+	do(t, owner, "GET", "/audit", nil, &entries)
+	moves := 0
+	for _, e := range entries {
+		if e.Action == "project.move_client" {
+			moves++
+		}
+	}
+	if moves != 2 {
+		t.Errorf("project.move_client audit rows = %d, want 2", moves)
+	}
+}
+
+func newRemote(t *testing.T, dir, name string) string {
+	t.Helper()
+	origin := filepath.Join(dir, name+".git")
+	mustGit(t, dir, "init", "--bare", "-b", "main", origin)
+	seed := filepath.Join(dir, name+"-seed")
+	mustGit(t, dir, "clone", origin, seed)
+	os.WriteFile(filepath.Join(seed, "README.md"), []byte(name+"\n"), 0o644)
+	mustGit(t, seed, "add", ".")
+	mustGit(t, seed, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "init")
+	mustGit(t, seed, "push", "origin", "HEAD:main")
+	return origin
+}
+
+func testCmd() string {
+	if runtime.GOOS == "windows" {
+		return "type empire-fake-agent.txt"
+	}
+	return "cat empire-fake-agent.txt"
 }
 
 func freshDB(t *testing.T, ctx context.Context, dbURL string) *pgxpool.Pool {
