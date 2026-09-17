@@ -36,7 +36,7 @@ func TestCanDecide(t *testing.T) {
 		{"worker:1", "owner", true},
 		{"worker:1", "worker:1", false}, // self-approval
 		{"worker:1", "worker:2", false}, // AI approving AI
-		{"owner", "owner", false},       // requester can't decide
+		{"owner", "owner", true},        // the owner may approve their own document
 		{"worker:1", "hermes", false},
 	}
 	for _, tt := range tests {

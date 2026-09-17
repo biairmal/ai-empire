@@ -13,6 +13,8 @@ func fixture(t *testing.T) string {
 	for rel, body := range map[string]string{
 		"global/principles.md":               "GLOBAL",
 		"global/README.md":                   "NAV",
+		"roles/developer.md":                 "DEV-ROLE",
+		"roles/architect.md":                 "ARCH-ROLE",
 		"stacks/go/testing.md":               "GO-STACK",
 		"stacks/dotnet/efcore.md":            "DOTNET-STACK",
 		"clients/acme/conventions.md":        "ACME-CLIENT",
@@ -50,17 +52,17 @@ func check(t *testing.T, b Bundle, wantFiles, mustHave, mustNot []string) {
 func TestResolveIsolation(t *testing.T) {
 	root := fixture(t)
 
-	b, err := Resolve(root, Scope{Stack: "go", Client: "acme", Project: "alpha", Docs: []string{"requirements/prd.md"}})
+	b, err := Resolve(root, Scope{Stacks: []string{"go"}, Client: "acme", Project: "alpha", Role: "developer", Docs: []string{"requirements/prd.md"}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	check(t, b,
-		[]string{"global/principles.md", "stacks/go/testing.md", "clients/acme/conventions.md", "projects/alpha/requirements/prd.md"},
-		[]string{"GLOBAL", "GO-STACK", "ACME-CLIENT", "ALPHA-PRD"},
-		[]string{"NAV", "DOTNET-STACK", "GLOBEX-CLIENT", "ALPHA-UNLISTED", "BETA-SECRET"})
+		[]string{"global/principles.md", "roles/developer.md", "stacks/go/testing.md", "clients/acme/conventions.md", "projects/alpha/requirements/prd.md"},
+		[]string{"GLOBAL", "DEV-ROLE", "GO-STACK", "ACME-CLIENT", "ALPHA-PRD"},
+		[]string{"NAV", "ARCH-ROLE", "DOTNET-STACK", "GLOBEX-CLIENT", "ALPHA-UNLISTED", "BETA-SECRET"})
 
 	// A client-less project gets no client knowledge at all.
-	b, err = Resolve(root, Scope{Stack: "dotnet", Project: "alpha"})
+	b, err = Resolve(root, Scope{Stacks: []string{"dotnet"}, Project: "alpha"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,14 +72,14 @@ func TestResolveIsolation(t *testing.T) {
 		[]string{"GO-STACK", "ACME-CLIENT", "GLOBEX-CLIENT", "ALPHA-PRD"})
 
 	for _, doc := range []string{"../beta/secret.md", filepath.Join(root, "projects/beta/secret.md"), "requirements/missing.md", "notes.txt", "../../clients/globex/conventions.md"} {
-		if _, err := Resolve(root, Scope{Stack: "go", Project: "alpha", Docs: []string{doc}}); err == nil {
+		if _, err := Resolve(root, Scope{Stacks: []string{"go"}, Project: "alpha", Docs: []string{doc}}); err == nil {
 			t.Errorf("doc %q: expected error", doc)
 		}
 	}
 	for _, bad := range []Scope{
-		{Stack: "../x", Project: "alpha"},
-		{Stack: "go", Project: "../beta"},
-		{Stack: "go", Project: "alpha", Client: "../globex"},
+		{Stacks: []string{"../x"}, Project: "alpha"},
+		{Stacks: []string{"go"}, Project: "../beta"},
+		{Stacks: []string{"go"}, Project: "alpha", Client: "../globex"},
 	} {
 		if _, err := Resolve(root, bad); err == nil {
 			t.Errorf("scope %+v: expected error", bad)
@@ -86,7 +88,7 @@ func TestResolveIsolation(t *testing.T) {
 }
 
 func TestResolveMissingFoldersAreFine(t *testing.T) {
-	b, err := Resolve(t.TempDir(), Scope{Stack: "rust", Client: "newco", Project: "alpha"})
+	b, err := Resolve(t.TempDir(), Scope{Stacks: []string{"rust"}, Client: "newco", Project: "alpha", Role: "nobody"})
 	if err != nil || len(b.Files) != 0 {
 		t.Fatalf("got %v, %v", b, err)
 	}

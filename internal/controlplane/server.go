@@ -9,12 +9,17 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"aiempire/internal/api"
+	"aiempire/internal/docs"
+	"aiempire/internal/workflow"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -25,12 +30,18 @@ type Config struct {
 	OwnerToken   string
 	WorkerToken  string
 	KnowledgeDir string
+	WorkflowsDir string
 	StaleAfter   time.Duration // worker considered dead after this long without a heartbeat
 }
 
 type Server struct {
-	db  *pgxpool.Pool
-	cfg Config
+	db        *pgxpool.Pool
+	cfg       Config
+	workflows map[string]workflow.Workflow
+
+	// kmu serialises writes to the knowledge repository (load → change → write).
+	// ponytail: one process-wide lock; per-project locks if document traffic grows.
+	kmu sync.Mutex
 }
 
 func New(db *pgxpool.Pool, cfg Config) (*Server, error) {
@@ -40,7 +51,17 @@ func New(db *pgxpool.Pool, cfg Config) (*Server, error) {
 	if cfg.StaleAfter <= 0 {
 		cfg.StaleAfter = time.Minute
 	}
-	return &Server{db: db, cfg: cfg}, nil
+	repo, err := docs.Load(cfg.KnowledgeDir)
+	if err != nil {
+		return nil, fmt.Errorf("knowledge: %w", err)
+	}
+	wfs := map[string]workflow.Workflow{}
+	if cfg.WorkflowsDir != "" {
+		if wfs, err = workflow.Load(cfg.WorkflowsDir, slices.Collect(maps.Keys(repo.Contracts))); err != nil {
+			return nil, fmt.Errorf("workflows: %w", err)
+		}
+	}
+	return &Server{db: db, cfg: cfg, workflows: wfs}, nil
 }
 
 type M = map[string]any
@@ -113,6 +134,23 @@ func (s *Server) Handler() http.Handler {
 	h("GET /audit", ownerOnly, s.listAudit)
 	h("GET /workers", anyone, s.listWorkers)
 
+	// V3: workflows (spec §7)
+	h("GET /workflows", anyone, s.listWorkflows)
+	h("POST /requests", ownerOnly, s.createRequest)
+	h("GET /requests", anyone, s.listRequests)
+	h("GET /requests/{id}", anyone, s.getRequest)
+	h("POST /requests/{id}/cancel", ownerOnly, s.cancelRequest)
+
+	// V3: documents and the knowledge graph (spec §13–§19, §37, §38)
+	h("GET /documents", anyone, s.listDocuments)
+	h("POST /documents", ownerOnly, s.newDocument)
+	h("POST /documents/validate", anyone, s.validateDocuments)
+	h("POST /documents/submit", ownerOnly, s.submitDocument)
+	h("POST /documents/reindex", ownerOnly, s.reindexDocuments)
+	h("GET /documents/export", ownerOnly, s.exportDocuments)
+	h("GET /trace", anyone, s.trace)
+	h("GET /impact", anyone, s.impact)
+
 	// Worker protocol
 	h("POST /workers/register", workerOnly, s.registerWorker)
 	h("POST /workers/{id}/heartbeat", workerOnly, s.heartbeat)
@@ -122,6 +160,8 @@ func (s *Server) Handler() http.Handler {
 	h("GET /tasks/{id}/context", workerOnly, s.taskContext)
 	h("POST /tasks/{id}/runs", workerOnly, s.startRun)
 	h("POST /runs/{id}/finish", workerOnly, s.finishRun)
+	h("POST /tasks/{id}/output", workerOnly, s.taskOutput)
+	h("POST /tasks/{id}/review", workerOnly, s.taskReview)
 
 	return mux
 }
@@ -190,7 +230,7 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 }
 
 func decode(r *http.Request, v any) error {
-	dec := json.NewDecoder(http.MaxBytesReader(nil, r.Body, 1<<20))
+	dec := json.NewDecoder(http.MaxBytesReader(nil, r.Body, 8<<20)) // documents can be large
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
 		return errf(http.StatusBadRequest, "bad json: %v", err)

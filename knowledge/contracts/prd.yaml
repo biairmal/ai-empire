@@ -1,0 +1,30 @@
+type: prd
+title: Product Requirements Document
+id_prefix: PRD
+question: What problem are we solving, for whom, and why?
+audience: Client stakeholders, product owner, delivery team
+scopes: [project]
+folder: requirements
+approval: required
+required_metadata: [owner]
+required_sections:
+  - Summary
+  - Background and Problem Statement
+  - Goals and Success Metrics
+  - Non-Goals
+  - Users and Personas
+  - User Stories
+  - Functional Requirements
+  - Non-Functional Requirements
+  - Assumptions and Constraints
+  - Dependencies
+  - Risks
+  - Release Scope
+  - Open Questions
+relationships:
+  derived_from: [change-request]
+  depends_on: [prd, adr]
+  tested_by: [test-plan]
+  supersedes: [prd]
+  references: ["*"]
+upstream: []

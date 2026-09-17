@@ -218,56 +218,67 @@ Client → projects → repositories. A client (optional) is the confidentiality
 ## V3 — AI Software Organization (§41)
 **Goal:** the full SDLC runs through AI, stopping at human gates.
 
+User guide: [docs/documents.md](docs/documents.md). Reference: [docs/workflows.md](docs/workflows.md).
+
 ### M3.1 Document contracts & templates (§16, §17, §19)
-- [ ] Write a contract + template for: PRD, Technical Design, ADR, API Spec, Database Design, Test Plan
-- [ ] *(defer)* UX Spec, Deployment Plan, Research Doc, Architecture Overview. Add each when a workflow first needs it
-- [ ] A contract lives as a YAML file next to its template: required metadata, required sections, allowed relationships, lifecycle, approval requirement
+- [x] Contract + template for: PRD, Technical Design, ADR, API Spec, Database Design, Test Plan
+- [x] Also shipped (client hand-over set): UX Spec, Architecture Overview, Implementation Plan, Deployment Plan, Runbook, Change Request, Release Notes, plus the internal types Guideline and Role
+- [ ] *(defer)* Research Doc. Add it when a workflow first needs it
+- [x] A contract lives as a YAML file ([knowledge/contracts/](knowledge/contracts/)) next to its template ([knowledge/templates/](knowledge/templates/)): required metadata, required sections, allowed relationships, upstream rules, approval requirement
+- [x] Templates follow industry references (MADR, arc42/C4, ISO/IEC/IEEE 29119-3, RFC 9457, MoSCoW, ISO 25010); guidance lives in `<!-- -->` comments and placeholders are `{{ … }}`
+- [x] A test fills every template and validates it against its contract, so templates and contracts cannot drift apart
 
 ### M3.2 Document validator (§18)
-- [ ] `empire docs validate [path]` covering frontmatter schema, required sections, unique IDs, valid project, allowed relationship types, referenced IDs exist, valid status/version
-- [ ] Upstream checks: e.g. a Technical Design's `satisfies` PRD must be `approved`
-- [ ] Wire it into the workflow: invalid doc → back to the generating agent with the errors
-- [ ] Run it in CI / pre-commit on the knowledge repo
+- [x] `empire docs validate [-project P]` (control plane, full checks) covering front matter, required sections, empty sections, placeholders, unique IDs, scope/folder, allowed relationship types, referenced IDs exist and are visible, status/version/dates, broken links and wikilinks
+- [x] Upstream checks: e.g. a Technical Design's `satisfies` PRD must be approved before the design goes for approval
+- [x] Wired into the workflow: invalid output goes back to the generating agent with the problem list (up to 3 attempts)
+- [x] `empire docs validate -local` / `make docs-check` (offline), a pre-commit hook (`make hooks`), and a CI workflow ([.github/workflows/ci.yml](.github/workflows/ci.yml))
 
-**Done when:** a broken document is rejected with a clear error list, and a valid one passes.
+**Done when:** a broken document is rejected with a clear error list, and a valid one passes. ✅
 
 ### M3.3 Artifact versioning & change requests (§12)
-- [ ] Approving a doc records `(doc_id, version, git commit sha)` in `approval_requests`
-- [ ] Guard: a changed file whose approved version sha differs, with no bumped version and no change request → validation error
-- [ ] Change-request flow: CR task → doc `v(n+1)` with `supersedes` → new approval gate
+- [x] Approving a document records `(scope, doc_id, version, content hash)` in the append-only `document_approvals` table. *Decision:* a content hash instead of a git sha — it works whether or not the knowledge folder is committed, and it ignores status changes and generated blocks
+- [x] Guard: an approved version whose content changed → validation error; a new version needs `derived_from` an approved change request that `affects` it
+- [x] Change-request flow (`change` workflow): CR → impact analysis at the gate → revise tasks (same id, version n+1, `derived_from: [CR]`) → approval. `supersedes` is used when a *different* document replaces an old one
+- [x] Documents edited after submission cannot be approved until resubmitted
 
-**Done when:** editing an approved PRD in place fails validation, and a proper v2 goes through approval.
+**Done when:** editing an approved PRD in place fails validation, and a proper v2 goes through approval. ✅
 
 ### M3.4 Workflow engine (§7)
-- [ ] Workflow definition as data (YAML): ordered steps, each with `role`, `output doc type`, `gate?`
-- [ ] Ship two workflows: `feature` (full §7 pipeline) and `quick-fix` (task → test → review → merge gate)
-- [ ] Engine: when a step completes → validate output → open gate if required → on approve, spawn the next step's tasks
-- [ ] The Planner step turns an approved design into N tasks with dependencies
+- [x] Workflow definition as data ([workflows/](workflows/)): ordered steps with `kind`, `role`, `doc_type`, `inputs`, `relations`, `gate`, `review`
+- [x] Ship `feature` (PRD → design → plan → code), `quick-fix` (code → AI review → merge gate), and `change` (CR → revise → plan → code)
+- [x] Engine: a step's output is validated → gate → on approval the next step starts; rejection or cancellation cancels the request and withdraws its unapproved documents
+- [x] The planner's work breakdown becomes N code tasks with dependencies, each in its own repository
 
-**Done when:** "add QR ticket validation" produces PRD → gate → design → gate → tasks → code → merge gate.
+**Done when:** "add QR ticket validation" produces PRD → gate → design → gate → tasks → code → merge gate. ✅
 
 ### M3.5 Agent roles (§26)
-- [ ] Per role, one file under `knowledge/roles/`: responsibilities, allowed tools/actions, required context, output contract, authority limits
-- [ ] Start with Architect, Planner, Developer, Reviewer. Add Tester, Documentation, and DevOps when a workflow step needs them
-- [ ] Enforce: the reviewer run ≠ the producing run; approval never comes from an agent
+- [x] One file per role under [knowledge/roles/](knowledge/roles/): mission, responsibilities, inputs, outputs, allowed actions, not allowed, quality bar. Loaded into every task of that role
+- [x] Product Manager, Architect, Planner, Developer, Reviewer
+- [ ] *(defer)* Tester, Documentation, DevOps. Add each when a workflow step needs it
+- [x] Enforced: the reviewer is a separate, read-only agent run; its REQUEST_CHANGES sends the task back (max 2 rounds); approval never comes from an agent (the owner may approve documents they wrote themselves)
 
 ### M3.6 Knowledge graph & traceability (§14, §15, §38)
-- [ ] Index: parse frontmatter from all docs into a `doc_edges` table (from, rel_type, to) on each knowledge-repo commit
-- [ ] Link tasks → docs (task metadata) and commits → tasks (branch name / commit trailer `Task: <id>`)
-- [ ] Queries: `trace forward <REQ-id>` and `trace back <file|commit>`
-- [ ] Context resolver v2: walk graph edges from the task instead of listing docs by hand
+- [x] Index: front matter → `documents` + `doc_edges`, rebuilt on every platform write, at control-plane start, by `empire docs reindex`, and by the post-commit hook
+- [x] Tasks → documents (context and output) and commits → tasks (`merge_sha`, `Task: N` trailer, changed files)
+- [x] `empire trace <DOC | task:N | request:N | commit:SHA | source file>` shows why something exists and what depends on it
+- [x] Context resolver v2: a task's listed documents are expanded along the graph (satisfies, implements, depends_on, derived_from, affects, tested_by, and specs that implement a design)
 
-**Done when:** "Why does this code exist?" answers with commit → task → design → PRD → original request.
+**Done when:** "Why does this code exist?" answers with commit → task → design → PRD → original request. ✅
 
 ### M3.7 Obsidian (§20)
-- [ ] Also emit relationships as `[[wikilinks]]` in a generated "Relations" section so Obsidian's graph shows them
-- [ ] Keep the repo fully usable without Obsidian (the validator and indexer read frontmatter, not wikilinks)
+- [x] A generated "Relations" block of `[[wikilinks]]` at the end of each document, so Obsidian's graph shows the typed relationships
+- [x] The repository stays fully usable without Obsidian (validator and index read front matter; the block is excluded from hashes and checks)
 
 ### M3.8 Change impact analysis (§37)
-- [ ] `impact <doc-id>` = reverse graph walk → affected docs, tasks, files
-- [ ] The workflow engine runs it automatically before a change request is approved and puts the result in the approval request
+- [x] `empire impact <DOC>` = graph walk → affected documents (with the relationship path), tasks, merge commits, and changed code files per repository
+- [x] Submitting a change request puts the impact report into its approval request automatically
 
-**Done when:** changing a PRD shows the list of affected designs, APIs, tests, and code before you approve.
+**Done when:** changing a PRD shows the list of affected designs, APIs, tests, and code before you approve. ✅
+
+### M3.9 Client hand-over
+- [x] `empire docs new` scaffolds a document from its template with the next free id
+- [x] `empire docs export -project P` writes approved documents without front matter or guidance, with a Document Control table and an index README
 
 ---
 
@@ -293,7 +304,7 @@ Do these in order of real pain, not in list order.
 
 ### Security (§34)
 - [ ] Separate tokens for owner, Hermes, and each worker; per-token scopes
-- [ ] Secrets never go into `CONTEXT.md` or agent logs; scrub logs
+- [ ] Secrets never go into `.empire-context.md` or agent logs; scrub logs
 - [ ] Protected branches on the remote (GitHub/GitLab) as a second line of defense
 - [ ] Production deploy credentials are never available to workers without an approved gate
 
@@ -303,8 +314,8 @@ Do these in order of real pain, not in list order.
 - [ ] **Restore drill:** restore both into a fresh environment, once a quarter. Add it to your calendar
 
 ### Testing
-- [x] Unit tests for the state machine, policy, context isolation (validator tests come with M3.2)
-- [x] One end-to-end test for the V1 demo, using a fake agent that writes a known file ([internal/worker/e2e_test.go](internal/worker/e2e_test.go))
+- [x] Unit tests for the state machine, policy, context isolation, validator, workflows, graph expansion
+- [x] End-to-end tests with a fake agent: V1 ([e2e_test.go](internal/worker/e2e_test.go)) and V3 workflows ([e2e_v3_test.go](internal/worker/e2e_v3_test.go))
 
 ---
 
@@ -319,6 +330,6 @@ Do these in order of real pain, not in list order.
 | M1.8 | Clients & multi-repo projects | Client → projects → repos; client knowledge isolated per client |
 | M1.9 | V1 polish | Edit repos/projects; agent summary in approvals |
 | M2 | Hermes + notifications *(deferred)* | **V2: run it all from your phone** |
-| M3.1–3.4 | Contracts, validation, workflows | **PRD → design → tasks pipeline with gates** |
-| M3.5–3.8 | Roles, graph, impact | **V3: traceability + impact analysis** |
+| M3.1–3.4 | Contracts, validation, workflows ✅ | **PRD → design → tasks pipeline with gates** |
+| M3.5–3.9 | Roles, graph, impact, hand-over ✅ | **V3: traceability + impact analysis** |
 | V4 | Factory | Multiple projects in parallel, within budget |

@@ -1,0 +1,7 @@
+#!/bin/sh
+# Refresh the knowledge graph index and Obsidian links after knowledge changes (spec §14).
+# Best effort: skipped silently when the control plane is not running.
+if git diff-tree --no-commit-id --name-only -r HEAD | grep -q '^knowledge/'; then
+    go run ./cmd/empire docs reindex >/dev/null 2>&1 && echo "post-commit: knowledge index refreshed"
+fi
+exit 0

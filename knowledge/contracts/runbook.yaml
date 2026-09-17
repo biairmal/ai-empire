@@ -1,0 +1,25 @@
+type: runbook
+title: Operations Runbook
+id_prefix: RB
+question: How is the system operated, monitored, and recovered?
+audience: Operations / on-call engineers, client IT support
+scopes: [project]
+folder: operations
+approval: optional
+required_metadata: [owner]
+required_sections:
+  - Service Overview
+  - Architecture and Dependencies
+  - Environments and Access
+  - Monitoring and Alerts
+  - Routine Procedures
+  - Troubleshooting
+  - Incident Response and Escalation
+  - Backup and Restore
+  - Contacts
+relationships:
+  documents: [architecture-overview, technical-design, api-spec, database-design]
+  depends_on: [adr]
+  supersedes: [runbook]
+  references: ["*"]
+upstream: []

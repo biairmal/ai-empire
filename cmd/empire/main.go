@@ -9,11 +9,16 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 	"text/tabwriter"
 
 	"aiempire/internal/api"
 	"aiempire/internal/client"
+	"aiempire/internal/docs"
 )
 
 const usage = `usage: empire <command> [flags] [args]
@@ -32,6 +37,19 @@ const usage = `usage: empire <command> [flags] [args]
   task get ID
   task cancel ID
   task retry ID
+  workflows
+  request create -project P [-workflow feature|quick-fix|change] [-repo NAME] [-desc TEXT] TITLE...
+  request list [-project P] [-status active|completed|cancelled]
+  request get ID
+  request cancel ID
+  docs new -project P -type TYPE -title TITLE -owner "Name, role"
+  docs list [-project P] [-type TYPE]
+  docs validate [-project P] [-local [-dir knowledge]]   (-local: offline, for CI and git hooks)
+  docs submit PATH|KEY|ID [-project P]
+  docs reindex
+  docs export -project P [-out DIR] [-all]
+  trace REF [-project P]     REF: task:N | request:N | commit:SHA | DOC-ID | knowledge path | a source file
+  impact DOC [-project P]
   approvals [-status PENDING_APPROVAL]
   approve ID [-m COMMENT]
   request-changes ID -m COMMENT
@@ -65,7 +83,7 @@ func main() {
 
 func dispatch(ctx context.Context, c *client.Client, args []string) error {
 	cmd := args[0]
-	if (cmd == "client" || cmd == "project" || cmd == "repo" || cmd == "task") && len(args) > 1 {
+	if slices.Contains([]string{"client", "project", "repo", "task", "request", "docs"}, cmd) && len(args) > 1 {
 		cmd, args = cmd+" "+args[1], args[1:]
 	}
 	fs := flag.NewFlagSet(cmd, flag.ExitOnError)
@@ -285,8 +303,8 @@ func dispatch(ctx context.Context, c *client.Client, args []string) error {
 		for _, r := range rs {
 			repos[r.ID] = r.Name
 		}
-		return table("ID\tPROJECT/REPO\tSTATUS\tSTAGE\tTRIES\tTITLE", ts, func(t api.Task) string {
-			return fmt.Sprintf("%d\t%s/%s\t%s\t%s\t%d\t%s", t.ID, projects[t.ProjectID], repos[t.RepositoryID], t.Status, t.Stage, t.Attempts, t.Title)
+		return table("ID\tPROJECT/REPO\tKIND\tROLE\tSTATUS\tSTAGE\tTRIES\tTITLE", ts, func(t api.Task) string {
+			return fmt.Sprintf("%d\t%s\t%s\t%s\t%s\t%s\t%d\t%s", t.ID, where(projects, repos, t), t.Kind, t.Role, t.Status, t.Stage, t.Attempts, t.Title)
 		})
 
 	case "task get":
@@ -322,6 +340,191 @@ func dispatch(ctx context.Context, c *client.Client, args []string) error {
 		}
 		fs.Parse(args[2:])
 		return post("/approvals/"+args[1]+"/"+cmd, api.Decision{Comment: *m}, nil)
+
+	case "workflows":
+		var wfs []struct {
+			Name, Description string
+			Steps             []string
+		}
+		if err := get("/workflows", &wfs); err != nil {
+			return err
+		}
+		for _, w := range wfs {
+			fmt.Printf("%s\n  %s\n  steps: %s\n\n", w.Name, w.Description, strings.Join(w.Steps, " → "))
+		}
+		return nil
+
+	case "request create":
+		var in api.CreateRequest
+		fs.StringVar(&in.Project, "project", "", "")
+		fs.StringVar(&in.Workflow, "workflow", "feature", "")
+		fs.StringVar(&in.Repository, "repo", "", "")
+		fs.StringVar(&in.Description, "desc", "", "")
+		fs.Parse(args[1:])
+		in.Title = strings.Join(fs.Args(), " ")
+		var out api.Request
+		if err := post("/requests", in, &out); err != nil {
+			return err
+		}
+		fmt.Printf("created request %d (%s workflow), now at step %q. Follow it with: empire request get %d\n", out.ID, out.Workflow, out.CurrentStep, out.ID)
+		return nil
+
+	case "request list":
+		project := fs.String("project", "", "")
+		status := fs.String("status", "", "")
+		fs.Parse(args[1:])
+		var rs []api.Request
+		if err := get("/requests?"+url.Values{"project": {*project}, "status": {*status}}.Encode(), &rs); err != nil {
+			return err
+		}
+		return table("ID\tWORKFLOW\tSTATUS\tSTEP\tTITLE", rs, func(r api.Request) string {
+			return fmt.Sprintf("%d\t%s\t%s\t%s\t%s", r.ID, r.Workflow, r.Status, r.CurrentStep, r.Title)
+		})
+
+	case "request get":
+		var d api.RequestDetail
+		if err := get("/requests/"+arg(args), &d); err != nil {
+			return err
+		}
+		return printRequest(d)
+
+	case "request cancel":
+		return post("/requests/"+arg(args)+"/cancel", nil, nil)
+
+	case "docs new":
+		var in api.NewDocument
+		fs.StringVar(&in.Project, "project", "", "")
+		fs.StringVar(&in.Type, "type", "", "")
+		fs.StringVar(&in.Title, "title", "", "")
+		fs.StringVar(&in.Owner, "owner", "", "")
+		fs.Parse(args[1:])
+		var out api.DocumentInfo
+		if err := post("/documents", in, &out); err != nil {
+			return err
+		}
+		fmt.Printf("created %s: knowledge/%s\nFill in every {{ … }} placeholder, then: empire docs validate -project %s && empire docs submit %s -project %s\n",
+			out.ID, out.Path, in.Project, out.ID, in.Project)
+		return nil
+
+	case "docs list":
+		project := fs.String("project", "", "")
+		typ := fs.String("type", "", "")
+		fs.Parse(args[1:])
+		var ds []api.DocumentInfo
+		if err := get("/documents?"+url.Values{"project": {*project}, "type": {*typ}}.Encode(), &ds); err != nil {
+			return err
+		}
+		return table("SCOPE\tID\tTYPE\tVER\tSTATUS\tAPPROVED\tTITLE", ds, func(d api.DocumentInfo) string {
+			return fmt.Sprintf("%s\t%s\t%s\t%d\t%s\t%s\t%s", d.Scope, d.ID, d.Type, d.Version, d.Status, yesNo(d.Approved), d.Title)
+		})
+
+	case "docs validate":
+		project := fs.String("project", "", "")
+		local := fs.Bool("local", false, "validate files on disk without the control plane (CI, git hooks)")
+		dir := fs.String("dir", "knowledge", "knowledge folder for -local")
+		fs.Parse(args[1:])
+		var ps []api.Problem
+		if *local {
+			// Offline: no approval records and no project→client map, so those checks are skipped.
+			repo, err := docs.Load(*dir)
+			if err != nil {
+				return err
+			}
+			for _, p := range repo.Validate(docs.Env{}) {
+				if *project == "" || strings.HasPrefix(p.Path, "projects/"+*project+"/") {
+					ps = append(ps, api.Problem{Path: filepath.ToSlash(filepath.Join(*dir, p.Path)), Message: p.Msg})
+				}
+			}
+		} else if err := post("/documents/validate", map[string]string{"project": *project}, &ps); err != nil {
+			return err
+		}
+		if len(ps) == 0 {
+			fmt.Println("all documents are valid")
+			return nil
+		}
+		for _, p := range ps {
+			fmt.Printf("%s: %s\n", p.Path, p.Message)
+		}
+		return fmt.Errorf("%d problem(s)", len(ps))
+
+	case "docs submit":
+		if len(args) < 2 {
+			return errors.New("usage: empire docs submit PATH|KEY|ID [-project P]")
+		}
+		project := fs.String("project", "", "")
+		fs.Parse(args[2:])
+		var out api.ApprovalRequest
+		if err := post("/documents/submit", api.DocumentRef{Ref: args[1], Project: *project}, &out); err != nil {
+			return err
+		}
+		fmt.Printf("approval #%d opened for %s. Decide with: empire approve %d\n", out.ID, out.SubjectRef, out.ID)
+		return nil
+
+	case "docs reindex":
+		var out map[string]int
+		if err := post("/documents/reindex", nil, &out); err != nil {
+			return err
+		}
+		fmt.Printf("indexed %d documents; Obsidian relation links refreshed\n", out["documents"])
+		return nil
+
+	case "docs export":
+		project := fs.String("project", "", "")
+		dir := fs.String("out", "", "")
+		all := fs.Bool("all", false, "include documents that are not approved")
+		fs.Parse(args[1:])
+		if *dir == "" {
+			*dir = filepath.Join("exports", *project)
+		}
+		var files []api.File
+		if err := get("/documents/export?"+url.Values{"project": {*project}, "all": {fmt.Sprint(*all)}}.Encode(), &files); err != nil {
+			return err
+		}
+		if err := os.MkdirAll(*dir, 0o755); err != nil {
+			return err
+		}
+		for _, f := range files {
+			if err := os.WriteFile(filepath.Join(*dir, filepath.Base(f.Name)), []byte(f.Content), 0o644); err != nil {
+				return err
+			}
+		}
+		fmt.Printf("exported %d document(s) to %s\n", len(files)-1, *dir)
+		return nil
+
+	case "trace":
+		if len(args) < 2 {
+			return errors.New("usage: empire trace REF [-project P]")
+		}
+		project := fs.String("project", "", "")
+		fs.Parse(args[2:])
+		refs := []string{args[1]}
+		if tasks := taskTrailers(args[1]); tasks != nil { // a source file: follow its commits
+			if len(tasks) == 0 {
+				return fmt.Errorf("no commit touching %s has a \"Task:\" trailer", args[1])
+			}
+			refs = tasks
+		}
+		for _, ref := range refs {
+			var tr api.Trace
+			if err := get("/trace?"+url.Values{"ref": {ref}, "project": {*project}}.Encode(), &tr); err != nil {
+				return err
+			}
+			printTrace(tr)
+		}
+		return nil
+
+	case "impact":
+		if len(args) < 2 {
+			return errors.New("usage: empire impact DOC [-project P]")
+		}
+		project := fs.String("project", "", "")
+		fs.Parse(args[2:])
+		var imp api.Impact
+		if err := get("/impact?"+url.Values{"doc": {args[1]}, "project": {*project}}.Encode(), &imp); err != nil {
+			return err
+		}
+		fmt.Print(imp.Report)
+		return nil
 
 	case "workers":
 		var ws []api.Worker
@@ -364,6 +567,110 @@ func (g flagSet) ptr(name, value string) *string {
 		return nil
 	}
 	return &value
+}
+
+func where(projects, repos map[int64]string, t api.Task) string {
+	if t.RepositoryID == nil {
+		return projects[t.ProjectID]
+	}
+	return projects[t.ProjectID] + "/" + repos[*t.RepositoryID]
+}
+
+func yesNo(b bool) string {
+	if b {
+		return "yes"
+	}
+	return "no"
+}
+
+func printRequest(d api.RequestDetail) error {
+	r := d.Request
+	fmt.Printf("Request #%d: %s\nWorkflow: %s   Status: %s   Current step: %s\n", r.ID, r.Title, r.Workflow, r.Status, r.CurrentStep)
+	if r.Description != "" {
+		fmt.Printf("\n%s\n", r.Description)
+	}
+	fmt.Println("\nSteps:")
+	for _, s := range d.Steps {
+		fmt.Printf("  %-18s %-9s %-16s %s\n", s.Name, s.Kind, s.Role, s.Status)
+	}
+	if len(d.Tasks) > 0 {
+		fmt.Println("\nTasks:")
+		table("  ID\tSTEP\tKIND\tSTATUS\tTITLE", d.Tasks, func(t api.Task) string {
+			return fmt.Sprintf("  %d\t%s\t%s\t%s\t%s", t.ID, t.Step, t.Kind, t.Status, t.Title)
+		})
+	}
+	if len(d.Documents) > 0 {
+		fmt.Println("\nDocuments:")
+		table("  ID\tVER\tSTATUS\tFILE", d.Documents, func(x api.DocumentInfo) string {
+			return fmt.Sprintf("  %s\t%d\t%s\tknowledge/%s", x.ID, x.Version, x.Status, x.Path)
+		})
+	}
+	var open []string
+	for _, a := range d.Approvals {
+		if a.Status == "PENDING_APPROVAL" {
+			open = append(open, fmt.Sprintf("#%d", a.ID))
+		}
+	}
+	if len(open) > 0 {
+		fmt.Printf("\nWaiting for you: approval %s (see: empire approvals)\n", strings.Join(open, ", "))
+	}
+	return nil
+}
+
+func printTrace(tr api.Trace) {
+	var walk func(ns []api.TraceNode, indent string)
+	walk = func(ns []api.TraceNode, indent string) {
+		for _, n := range ns {
+			via := ""
+			if n.Via != "" {
+				via = "  [" + n.Via + "]"
+			}
+			status := ""
+			if n.Status != "" {
+				status = " (" + n.Status + ")"
+			}
+			fmt.Printf("%s- %s %s%s%s\n", indent, n.Kind, n.Title, status, via)
+			walk(n.Children, indent+"    ")
+		}
+	}
+	fmt.Printf("%s %s: %s\n", tr.Subject.Kind, tr.Subject.Ref, tr.Subject.Title)
+	walk(tr.Subject.Children, "  ")
+	fmt.Println("\nWhy it exists:")
+	if len(tr.Why) == 0 {
+		fmt.Println("  (nothing upstream)")
+	}
+	walk(tr.Why, "  ")
+	fmt.Println("\nWhat depends on it:")
+	if len(tr.Effects) == 0 {
+		fmt.Println("  (nothing downstream)")
+	}
+	walk(tr.Effects, "  ")
+	fmt.Println()
+}
+
+var trailerRe = regexp.MustCompile(`(?m)^Task:\s*(\d+)\s*$`)
+
+// taskTrailers returns "task:N" refs from the git history of a local source
+// file, or nil if ref is not a file inside a git repository.
+func taskTrailers(ref string) []string {
+	info, err := os.Stat(ref)
+	if err != nil || info.IsDir() || strings.HasSuffix(ref, ".md") && strings.Contains(filepath.ToSlash(ref), "knowledge/") {
+		return nil
+	}
+	abs, _ := filepath.Abs(ref)
+	cmd := exec.Command("git", "log", "--format=%B%x00", "--", filepath.Base(abs))
+	cmd.Dir = filepath.Dir(abs)
+	out, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+	refs := []string{}
+	for _, m := range trailerRe.FindAllStringSubmatch(string(out), -1) {
+		if r := "task:" + m[1]; !slices.Contains(refs, r) {
+			refs = append(refs, r)
+		}
+	}
+	return refs
 }
 
 func arg(args []string) string {

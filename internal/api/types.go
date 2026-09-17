@@ -36,7 +36,18 @@ type Repository struct {
 type Task struct {
 	ID                   int64     `json:"id" db:"id"`
 	ProjectID            int64     `json:"project_id" db:"project_id"`
-	RepositoryID         int64     `json:"repository_id" db:"repository_id"`
+	RepositoryID         *int64    `json:"repository_id" db:"repository_id"` // code tasks only
+	Kind                 string    `json:"kind" db:"kind"`                   // code | document | plan | revise
+	Role                 string    `json:"role" db:"role"`
+	RequestID            *int64    `json:"request_id" db:"request_id"`
+	Step                 string    `json:"step" db:"step"`
+	DocType              string    `json:"doc_type" db:"doc_type"`
+	Revises              string    `json:"revises" db:"revises"`
+	OutputDocs           []string  `json:"output_docs" db:"output_docs"`
+	Review               bool      `json:"review" db:"review"`
+	ReviewRounds         int       `json:"review_rounds" db:"review_rounds"`
+	MergeSHA             string    `json:"merge_sha" db:"merge_sha"`
+	ChangedFiles         []string  `json:"changed_files" db:"changed_files"` // files the merge changed
 	Title                string    `json:"title" db:"title"`
 	Description          string    `json:"description" db:"description"`
 	Status               string    `json:"status" db:"status"`
@@ -49,6 +60,20 @@ type Task struct {
 	LastError            string    `json:"last_error" db:"last_error"`
 	CreatedAt            time.Time `json:"created_at" db:"created_at"`
 	UpdatedAt            time.Time `json:"updated_at" db:"updated_at"`
+}
+
+// Request is a plain-language request driven through a workflow (spec §7).
+type Request struct {
+	ID           int64     `json:"id" db:"id"`
+	ProjectID    int64     `json:"project_id" db:"project_id"`
+	RepositoryID *int64    `json:"repository_id" db:"repository_id"`
+	Workflow     string    `json:"workflow" db:"workflow"`
+	Title        string    `json:"title" db:"title"`
+	Description  string    `json:"description" db:"description"`
+	Status       string    `json:"status" db:"status"`
+	CurrentStep  string    `json:"current_step" db:"current_step"`
+	CreatedAt    time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at" db:"updated_at"`
 }
 
 type Worker struct {
@@ -73,11 +98,14 @@ type AgentRun struct {
 	Tokens       int64      `json:"tokens" db:"tokens"`
 	CostUSD      float64    `json:"cost_usd" db:"cost_usd"`
 	Summary      string     `json:"summary" db:"summary"` // what the agent says it did
+	Role         string     `json:"role" db:"role"`
 }
 
 type ApprovalRequest struct {
 	ID             int64     `json:"id" db:"id"`
-	ProjectID      int64     `json:"project_id" db:"project_id"`
+	ProjectID      *int64    `json:"project_id" db:"project_id"`
+	TaskID         *int64    `json:"task_id" db:"task_id"`
+	Covers         []string  `json:"covers" db:"covers"` // documents approved together: "<key>@v<version>@<hash>"
 	SubjectType    string    `json:"subject_type" db:"subject_type"`
 	SubjectRef     string    `json:"subject_ref" db:"subject_ref"`
 	SubjectVersion string    `json:"subject_version" db:"subject_version"`
@@ -169,8 +197,10 @@ type Claim struct {
 }
 
 type Transition struct {
-	To    string `json:"to"`
-	Error string `json:"error,omitempty"`
+	To           string   `json:"to"`
+	Error        string   `json:"error,omitempty"`
+	MergeSHA     string   `json:"merge_sha,omitempty"`     // with to=COMPLETED: the commit on the default branch
+	ChangedFiles []string `json:"changed_files,omitempty"` // with to=COMPLETED: files the merge changed
 }
 
 type Authorize struct {
@@ -189,6 +219,7 @@ type AuthorizeReply struct {
 type StartRun struct {
 	Model        string   `json:"model"`
 	ContextFiles []string `json:"context_files"`
+	Role         string   `json:"role"`
 }
 
 type FinishRun struct {
@@ -205,4 +236,127 @@ type Decision struct {
 
 type ID struct {
 	ID int64 `json:"id"`
+}
+
+// V3: workflows and documents.
+
+type CreateRequest struct {
+	Project     string `json:"project"`
+	Workflow    string `json:"workflow"`             // default "feature"
+	Repository  string `json:"repository,omitempty"` // required by workflows that start with code
+	Title       string `json:"title"`
+	Description string `json:"description"`
+}
+
+type RequestDetail struct {
+	Request   Request           `json:"request"`
+	Steps     []StepStatus      `json:"steps"`
+	Tasks     []Task            `json:"tasks"`
+	Documents []DocumentInfo    `json:"documents"`
+	Approvals []ApprovalRequest `json:"approvals"`
+}
+
+type StepStatus struct {
+	Name   string `json:"name"`
+	Kind   string `json:"kind"`
+	Role   string `json:"role"`
+	Status string `json:"status"` // not_started | in_progress | waiting_for_human | completed | cancelled
+}
+
+type DocumentInfo struct {
+	Key      string `json:"key"`
+	Scope    string `json:"scope"`
+	ID       string `json:"id"`
+	Type     string `json:"type"`
+	Title    string `json:"title"`
+	Path     string `json:"path"`
+	Status   string `json:"status"`
+	Version  int    `json:"version"`
+	Approved bool   `json:"approved"` // current content is an approved version
+}
+
+type File struct {
+	Name    string `json:"name"`
+	Content string `json:"content"`
+}
+
+// TaskContext is everything a worker needs to run a task's agent.
+type TaskContext struct {
+	Files        []string            `json:"files"`   // knowledge files in the bundle
+	Content      string              `json:"content"` // the bundle itself
+	Kind         string              `json:"kind"`
+	Role         string              `json:"role"`
+	DocType      string              `json:"doc_type,omitempty"`
+	Templates    map[string]string   `json:"templates,omitempty"` // doc type → template
+	Contracts    map[string]string   `json:"contracts,omitempty"` // doc type → contract YAML
+	Request      *Request            `json:"request,omitempty"`
+	Repositories []Repository        `json:"repositories,omitempty"`
+	Drafts       []File              `json:"drafts,omitempty"`    // current versions to rework or revise
+	Relations    map[string][]string `json:"relations,omitempty"` // relationships the platform will add
+}
+
+type TaskOutput struct {
+	Files   []File `json:"files"`
+	Summary string `json:"summary"`
+}
+
+type OutputReply struct {
+	Accepted  bool     `json:"accepted"`
+	Problems  []string `json:"problems,omitempty"`
+	Documents []string `json:"documents,omitempty"`
+	Status    string   `json:"status,omitempty"` // task status after acceptance
+}
+
+type ReviewReport struct {
+	Verdict string `json:"verdict"` // APPROVE | REQUEST_CHANGES | NONE
+	Summary string `json:"summary"`
+}
+
+type ReviewReply struct {
+	Rework bool `json:"rework"` // the task went back to the developer
+}
+
+type NewDocument struct {
+	Project string `json:"project"`
+	Type    string `json:"type"`
+	Title   string `json:"title"`
+	Owner   string `json:"owner"`
+}
+
+type DocumentRef struct {
+	Ref     string `json:"ref"`               // knowledge-relative path, or key "projects/x/PRD-001"
+	Project string `json:"project,omitempty"` // lets Ref be a bare id
+}
+
+type Problem struct {
+	Path    string `json:"path"`
+	Message string `json:"message"`
+}
+
+type TraceNode struct {
+	Kind     string      `json:"kind"` // request | document | task | commit
+	Ref      string      `json:"ref"`
+	Title    string      `json:"title"`
+	Status   string      `json:"status,omitempty"`
+	Via      string      `json:"via,omitempty"` // relationship that led here
+	Children []TraceNode `json:"children,omitempty"`
+}
+
+type Trace struct {
+	Subject TraceNode   `json:"subject"`
+	Why     []TraceNode `json:"why"`     // upstream: what this exists for
+	Effects []TraceNode `json:"effects"` // downstream: what depends on this
+}
+
+type Impact struct {
+	Document  DocumentInfo  `json:"document"`
+	Documents []ImpactedDoc `json:"documents"`
+	Tasks     []Task        `json:"tasks"`
+	Report    string        `json:"report"`
+}
+
+type ImpactedDoc struct {
+	DocumentInfo
+	Via   string `json:"via"`
+	Depth int    `json:"depth"`
 }

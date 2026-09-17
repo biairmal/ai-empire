@@ -1,0 +1,9 @@
+# Small, well-understood change in one repository: no documents, straight to reviewed code.
+# Requires a repository on the request (empire request create -repo NAME).
+name: quick-fix
+description: Small change in one repository, AI-reviewed, then the human merge gate.
+steps:
+  - name: implement
+    kind: code
+    role: developer
+    review: true

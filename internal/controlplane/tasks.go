@@ -7,6 +7,7 @@ import (
 	"strconv"
 
 	"aiempire/internal/api"
+	"aiempire/internal/docs"
 	"aiempire/internal/knowledge"
 	"aiempire/internal/task"
 
@@ -21,9 +22,9 @@ func (s *Server) createTask(r *http.Request, a actor) (any, error) {
 	if in.Title == "" {
 		return nil, errf(http.StatusBadRequest, "title is required")
 	}
-	docs := in.ContextDocs
-	if docs == nil {
-		docs = []string{}
+	ctxDocs := in.ContextDocs
+	if ctxDocs == nil {
+		ctxDocs = []string{}
 	}
 
 	var out api.Task
@@ -38,7 +39,7 @@ func (s *Server) createTask(r *http.Request, a actor) (any, error) {
 			return err
 		}
 		// Fail early on docs the worker won't be able to load.
-		scope, err := scopeFor(ctx, tx, p.ID, repo.ID, docs)
+		scope, err := scopeFor(ctx, tx, p.ID, &repo.ID, "developer", ctxDocs)
 		if err != nil {
 			return err
 		}
@@ -53,7 +54,7 @@ func (s *Server) createTask(r *http.Request, a actor) (any, error) {
 		out, err = one[api.Task](ctx, tx, `
 			INSERT INTO tasks (project_id, repository_id, title, description, required_capabilities, context_docs)
 			VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
-			p.ID, repo.ID, in.Title, in.Description, caps, docs)
+			p.ID, repo.ID, in.Title, in.Description, caps, ctxDocs)
 		if err != nil {
 			return err
 		}
@@ -123,7 +124,7 @@ func (s *Server) getTask(r *http.Request, a actor) (any, error) {
 		return nil, err
 	}
 	d.Approvals, err = collect[api.ApprovalRequest](ctx, s.db,
-		`SELECT * FROM approval_requests WHERE subject_type = 'task' AND subject_ref = $1 ORDER BY id`, strconv.FormatInt(id, 10))
+		`SELECT * FROM approval_requests WHERE task_id = $1 OR (subject_type = 'task' AND subject_ref = $2) ORDER BY id`, id, strconv.FormatInt(id, 10))
 	return d, err
 }
 
@@ -132,20 +133,58 @@ func (s *Server) cancelTask(r *http.Request, a actor) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	s.kmu.Lock() // cancelling withdraws the task's unapproved documents
+	defer s.kmu.Unlock()
 	return nil, s.tx(r.Context(), func(tx pgx.Tx) error {
 		t, err := lockTask(r.Context(), tx, id)
 		if err != nil {
 			return err
 		}
-		if err := move(r.Context(), tx, a, t, task.Cancelled, nil); err != nil {
+		if err := s.cancelTaskTx(r.Context(), tx, a, t); err != nil {
 			return err
 		}
-		// Close open gates so they don't linger in the approval queue.
-		_, err = tx.Exec(r.Context(), `
-			UPDATE approval_requests SET status = 'REJECTED'
-			WHERE subject_type = 'task' AND subject_ref = $1 AND status = 'PENDING_APPROVAL'`, strconv.FormatInt(id, 10))
-		return err
+		if t.RequestID != nil {
+			return s.advance(r.Context(), tx, a, *t.RequestID) // a cancelled step cancels its request
+		}
+		return nil
 	})
+}
+
+// cancelTaskTx cancels a task, closes its open gates so they don't linger in the
+// approval queue, and marks the documents it produced but never got approved as rejected.
+// Callers hold s.kmu when the task may have produced documents.
+func (s *Server) cancelTaskTx(ctx context.Context, tx pgx.Tx, a actor, t api.Task) error {
+	if err := move(ctx, tx, a, t, task.Cancelled, nil); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE approval_requests SET status = 'REJECTED'
+		WHERE status = 'PENDING_APPROVAL'
+		  AND (task_id = $1 OR (subject_type = 'task' AND subject_ref = $2))`, t.ID, strconv.FormatInt(t.ID, 10)); err != nil {
+		return err
+	}
+	if len(t.OutputDocs) == 0 {
+		return nil
+	}
+	repo, env, err := s.repoEnv(ctx, tx)
+	if err != nil {
+		return err
+	}
+	for _, key := range t.OutputDocs {
+		k, _ := docs.ParseKey(key)
+		d := repo.Get(k)
+		if d == nil || d.Status == docs.Approved || d.Status == docs.Superseded || env.IsApproved(d) {
+			continue
+		}
+		d.Set("status", docs.Rejected)
+		if err := s.writeKnowledge(d.Path, d.Bytes()); err != nil {
+			return err
+		}
+		if err := audit(ctx, tx, a, "document.withdrawn", "document:"+key, M{"task_id": t.ID}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Server) retryTask(r *http.Request, a actor) (any, error) {

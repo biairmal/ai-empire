@@ -1,0 +1,15 @@
+type: guideline
+title: Engineering Guideline
+id_prefix: GL
+question: Which rule must every task in this scope follow?
+audience: Engineers and AI agents
+scopes: [global, stack, client]
+folder: ""
+approval: required
+required_metadata: []
+required_sections: []
+relationships:
+  depends_on: [guideline]
+  supersedes: [guideline]
+  references: ["*"]
+upstream: []

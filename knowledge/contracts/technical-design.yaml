@@ -1,0 +1,35 @@
+type: technical-design
+title: Technical Design
+id_prefix: TD
+question: How will the system technically satisfy the requirements?
+audience: Engineers, architects, client technical stakeholders
+scopes: [project]
+folder: architecture
+approval: required
+required_metadata: [owner]
+required_sections:
+  - Purpose
+  - Requirements Addressed
+  - Proposed Solution
+  - Architecture
+  - Data Changes
+  - API Changes
+  - Failure Scenarios
+  - Security Considerations
+  - Observability
+  - Alternatives Considered
+  - Testing Strategy
+  - Rollout and Migration
+  - Open Questions
+relationships:
+  satisfies: [prd, ux-spec]
+  depends_on: [adr, architecture-overview, technical-design]
+  affects: [api-spec, database-design, ux-spec, architecture-overview, runbook]
+  tested_by: [test-plan]
+  derived_from: [change-request]
+  supersedes: [technical-design]
+  references: ["*"]
+upstream:
+  - relationship: satisfies
+    types: [prd]
+    min: 1

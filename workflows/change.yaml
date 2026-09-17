@@ -1,0 +1,29 @@
+# Change to already-approved work (spec §12): change request → new document versions → plan → code.
+# Approved documents are never edited in place; the approved CR authorises new versions.
+name: change
+description: Change approved requirements or design through a change request, new document versions, a plan, and reviewed code.
+steps:
+  - name: change-request
+    kind: document
+    doc_type: change-request
+    role: product-manager
+
+  - name: revise
+    kind: revise                # one task per document listed in the CR's `affects`
+    role: architect
+    inputs: [change-request]
+
+  - name: plan
+    kind: plan
+    doc_type: implementation-plan
+    role: planner
+    inputs: [change-request, revise]
+    gate: true
+    relations:
+      derived_from: [change-request]
+
+  - name: implement
+    kind: code
+    role: developer
+    inputs: [change-request, revise, plan]
+    review: true

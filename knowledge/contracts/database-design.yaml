@@ -1,0 +1,28 @@
+type: database-design
+title: Database Design
+id_prefix: DB
+question: How is the data represented and constrained?
+audience: Backend engineers, DBAs, client technical stakeholders, auditors
+scopes: [project]
+folder: database
+approval: required
+required_metadata: [owner]
+required_sections:
+  - Overview
+  - Data Model
+  - Entities
+  - Relationships and Constraints
+  - Indexes and Performance
+  - Migrations and Backfill
+  - Data Privacy and Retention
+  - Backup and Recovery
+  - Open Questions
+relationships:
+  implements: [technical-design]
+  satisfies: [prd]
+  depends_on: [adr]
+  tested_by: [test-plan]
+  derived_from: [change-request]
+  supersedes: [database-design]
+  references: ["*"]
+upstream: []

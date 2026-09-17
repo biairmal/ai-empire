@@ -1,0 +1,27 @@
+type: api-spec
+title: API Specification
+id_prefix: API
+question: What contract does the system expose?
+audience: Client integrators, frontend and backend engineers, QA
+scopes: [project]
+folder: api
+approval: required
+required_metadata: [owner]
+required_sections:
+  - Overview
+  - Conventions
+  - Authentication and Authorization
+  - Endpoints
+  - Data Models
+  - Errors
+  - Versioning and Compatibility
+  - Change Log
+relationships:
+  implements: [technical-design]
+  satisfies: [prd]
+  depends_on: [adr, database-design]
+  tested_by: [test-plan]
+  derived_from: [change-request]
+  supersedes: [api-spec]
+  references: ["*"]
+upstream: []

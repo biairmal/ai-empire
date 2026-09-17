@@ -1,0 +1,26 @@
+type: implementation-plan
+title: Implementation Plan
+id_prefix: PLAN
+question: What work will be done, in which order, in which repository?
+audience: Delivery team, project owner
+scopes: [project]
+folder: planning
+approval: optional
+required_metadata: [owner]
+required_sections:
+  - Overview
+  - Scope
+  - Work Breakdown
+  - Sequencing and Dependencies
+  - Risks and Mitigations
+  - Definition of Done
+relationships:
+  derived_from: [technical-design, prd, change-request]
+  depends_on: [adr]
+  supersedes: [implementation-plan]
+  references: ["*"]
+upstream:
+  # A plan builds on an approved design, or on an approved change request.
+  - relationship: derived_from
+    types: [technical-design, change-request]
+    min: 1

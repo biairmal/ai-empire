@@ -1,0 +1,29 @@
+type: architecture-overview
+title: Architecture Overview
+id_prefix: ARCH
+question: How is the whole system structured, and why?
+audience: Client technical stakeholders, architects, engineers, operations
+scopes: [project]
+folder: architecture
+approval: required
+required_metadata: [owner]
+required_sections:
+  - Introduction and Goals
+  - Constraints
+  - System Context
+  - Container View
+  - Key Components
+  - Data and Integrations
+  - Deployment View
+  - Cross-Cutting Concerns
+  - Quality Attributes
+  - Architecture Decisions
+  - Risks and Technical Debt
+  - Glossary
+relationships:
+  depends_on: [adr]
+  documents: ["*"]
+  derived_from: [change-request]
+  supersedes: [architecture-overview]
+  references: ["*"]
+upstream: []

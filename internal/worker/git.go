@@ -51,15 +51,18 @@ func ensureBase(ctx context.Context, base, repoURL string) error {
 		if _, err := git(ctx, "", "clone", "--no-checkout", repoURL, base); err != nil {
 			return err
 		}
-		// Keep the context bundle out of every task commit.
-		excl := filepath.Join(base, ".git", "info", "exclude")
-		os.MkdirAll(filepath.Dir(excl), 0o755)
-		f, err := os.OpenFile(excl, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-		if err != nil {
-			return err
+	}
+	// Keep platform files out of every task commit.
+	excl := filepath.Join(base, ".git", "info", "exclude")
+	os.MkdirAll(filepath.Dir(excl), 0o755)
+	current, _ := os.ReadFile(excl)
+	for _, pattern := range []string{"/" + contextFile, "/.empire/"} {
+		if !strings.Contains(string(current), "\n"+pattern+"\n") {
+			current = append(current, []byte("\n"+pattern+"\n")...)
 		}
-		fmt.Fprintf(f, "\n/%s\n", contextFile)
-		f.Close()
+	}
+	if err := os.WriteFile(excl, current, 0o644); err != nil {
+		return err
 	}
 	_, err := git(ctx, base, "fetch", "--prune", "origin")
 	return err

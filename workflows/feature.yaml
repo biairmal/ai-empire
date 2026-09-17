@@ -1,0 +1,33 @@
+# New feature: idea → PRD → design → plan → reviewed code (spec §7).
+# Every document step stops for human approval; every code task stops at the merge gate.
+name: feature
+description: New feature from a plain-language request to merged code, with PRD, design, and plan approval.
+steps:
+  - name: prd
+    kind: document
+    doc_type: prd
+    role: product-manager
+
+  - name: design
+    kind: document
+    doc_type: technical-design
+    role: architect
+    inputs: [prd]
+    extra_types: [adr]          # the architect may add ADRs; they are approved together with the design
+    relations:
+      satisfies: [prd]
+
+  - name: plan
+    kind: plan
+    doc_type: implementation-plan
+    role: planner
+    inputs: [prd, design]
+    gate: true                  # "optional plan approval" (spec §7) — set false to skip
+    relations:
+      derived_from: [design]
+
+  - name: implement
+    kind: code
+    role: developer
+    inputs: [prd, design, plan]
+    review: true                # AI reviewer runs before the human merge gate

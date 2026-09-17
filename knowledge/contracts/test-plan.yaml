@@ -1,0 +1,28 @@
+type: test-plan
+title: Test Plan
+id_prefix: TP
+question: How do we prove the requirements are satisfied?
+audience: QA, engineers, client stakeholders responsible for acceptance
+scopes: [project]
+folder: testing
+approval: required
+required_metadata: [owner]
+required_sections:
+  - Introduction and Scope
+  - Test Items
+  - Features to Be Tested
+  - Features Not to Be Tested
+  - Test Approach
+  - Requirements Traceability
+  - Test Cases
+  - Test Environment and Data
+  - Entry and Exit Criteria
+  - Defect Management
+  - Risks and Contingencies
+  - Acceptance and Sign-off
+relationships:
+  derived_from: [prd, technical-design, ux-spec, api-spec, change-request]
+  depends_on: [adr]
+  supersedes: [test-plan]
+  references: ["*"]
+upstream: []

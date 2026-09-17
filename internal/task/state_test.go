@@ -16,7 +16,8 @@ func TestCanTransition(t *testing.T) {
 		{Failed, Pending, true},  // retry
 		{Pending, Running, false},
 		{Pending, Completed, false},
-		{WaitingForHuman, Completed, false}, // must resume through a worker
+		{WaitingForHuman, Completed, true}, // document approval completes the task
+		{WaitingForHuman, Running, false},
 		{Completed, Pending, false},
 		{Cancelled, Pending, false},
 		{"BOGUS", Pending, false},

@@ -1,0 +1,21 @@
+type: role
+title: Agent Role
+id_prefix: ROLE
+question: What is this agent responsible for, and what may it do?
+audience: Platform owner and AI agents
+scopes: [roles]
+folder: ""
+approval: required
+required_metadata: []
+required_sections:
+  - Mission
+  - Responsibilities
+  - Inputs
+  - Outputs
+  - Allowed Actions
+  - Not Allowed
+  - Quality Bar
+relationships:
+  depends_on: [guideline]
+  references: ["*"]
+upstream: []

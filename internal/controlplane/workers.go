@@ -1,6 +1,7 @@
 package controlplane
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"log"
@@ -129,8 +130,10 @@ func (s *Server) claim(r *http.Request, a actor) (any, error) {
 		if err != nil {
 			return err
 		}
-		repo, err := one[api.Repository](ctx, tx, `SELECT * FROM repositories WHERE id = $1`, t.RepositoryID)
-		out = &api.Claim{Task: t, Project: p, Repository: repo}
+		out = &api.Claim{Task: t, Project: p}
+		if t.RepositoryID != nil {
+			out.Repository, err = one[api.Repository](ctx, tx, `SELECT * FROM repositories WHERE id = $1`, *t.RepositoryID)
+		}
 		return err
 	})
 	if err != nil || out == nil {
@@ -180,15 +183,25 @@ func (s *Server) workerTransition(r *http.Request, a actor) (any, error) {
 		if err != nil {
 			return err
 		}
-		// Work only completes through the merge stage, which sits behind the merge gate.
-		if in.To == task.Completed && t.Stage != task.StageMerge {
-			return errf(http.StatusConflict, "task %d cannot complete from stage %s", t.ID, t.Stage)
+		// Code only completes through the merge stage, which sits behind the merge gate;
+		// documents complete through their approval, never through a worker.
+		if in.To == task.Completed && (t.Kind != "code" || t.Stage != task.StageMerge) {
+			return errf(http.StatusConflict, "task %d cannot be completed by a worker from stage %s", t.ID, t.Stage)
 		}
-		if err := move(ctx, tx, a, t, in.To, M{"error": in.Error}); err != nil {
+		if err := move(ctx, tx, a, t, in.To, M{"error": in.Error, "merge_sha": in.MergeSHA}); err != nil {
 			return err
 		}
-		if in.To == task.Failed {
+		switch in.To {
+		case task.Failed:
 			_, err = tx.Exec(ctx, `UPDATE tasks SET last_error = $2 WHERE id = $1`, t.ID, in.Error)
+		case task.Completed:
+			files := in.ChangedFiles
+			if files == nil {
+				files = []string{}
+			}
+			if _, err = tx.Exec(ctx, `UPDATE tasks SET merge_sha = $2, changed_files = $3 WHERE id = $1`, t.ID, in.MergeSHA, files); err == nil && t.RequestID != nil {
+				err = s.advance(ctx, tx, a, *t.RequestID)
+			}
 		}
 		return err
 	})
@@ -256,24 +269,84 @@ func (s *Server) authorize(r *http.Request, a actor) (any, error) {
 	return reply, err
 }
 
+// taskContext gives the worker the minimal context for its agent (spec §22):
+// the knowledge bundle, and for document tasks the templates, contracts,
+// request, repositories, and the drafts being reworked or revised.
 func (s *Server) taskContext(r *http.Request, a actor) (any, error) {
-	var scope knowledge.Scope
+	var out api.TaskContext
 	err := s.tx(r.Context(), func(tx pgx.Tx) error {
-		t, err := lockOwnTask(r.Context(), tx, r, a)
+		ctx := r.Context()
+		t, err := lockOwnTask(ctx, tx, r, a)
 		if err != nil {
 			return err
 		}
-		scope, err = scopeFor(r.Context(), tx, t.ProjectID, t.RepositoryID, t.ContextDocs)
-		return err
+		scope, err := scopeFor(ctx, tx, t.ProjectID, t.RepositoryID, t.Role, t.ContextDocs)
+		if err != nil {
+			return err
+		}
+		repo, env, err := s.repoEnv(ctx, tx)
+		if err != nil {
+			return err
+		}
+		scope.Docs = expandDocs(repo, env, scope.Project, scope.Client, scope.Docs)
+		b, err := knowledge.Resolve(s.cfg.KnowledgeDir, scope)
+		if err != nil {
+			return errf(http.StatusUnprocessableEntity, "context: %v", err)
+		}
+		out = api.TaskContext{Files: b.Files, Content: b.Content, Kind: t.Kind, Role: t.Role, DocType: t.DocType}
+		if t.Kind == "code" || t.RequestID == nil {
+			return nil
+		}
+
+		req, err := one[api.Request](ctx, tx, `SELECT * FROM requests WHERE id = $1`, *t.RequestID)
+		if err != nil {
+			return err
+		}
+		out.Request = &req
+		if out.Repositories, err = collect[api.Repository](ctx, tx,
+			`SELECT * FROM repositories WHERE project_id = $1 ORDER BY id`, t.ProjectID); err != nil {
+			return err
+		}
+		step, _, _ := s.workflows[req.Workflow].Step(t.Step)
+		types := append([]string{t.DocType}, step.ExtraTypes...)
+		out.Templates, out.Contracts = map[string]string{}, map[string]string{}
+		for _, typ := range types {
+			if out.Templates[typ], err = s.readKnowledge("templates/" + typ + ".md"); err != nil {
+				return err
+			}
+			if out.Contracts[typ], err = s.readKnowledge("contracts/" + typ + ".yaml"); err != nil {
+				return err
+			}
+		}
+
+		drafts := t.OutputDocs
+		if len(drafts) == 0 && t.Revises != "" {
+			drafts = []string{t.Revises}
+		}
+		for _, key := range drafts {
+			if k, ok := docsKey(key); ok {
+				if d := repo.Get(k); d != nil {
+					body, err := s.readKnowledge(d.Path)
+					if err != nil {
+						return err
+					}
+					out.Drafts = append(out.Drafts, api.File{Name: pathBase(d.Path), Content: body})
+				}
+			}
+		}
+		reqTasks, err := collect[api.Task](ctx, tx, `SELECT * FROM tasks WHERE request_id = $1`, req.ID)
+		if err != nil {
+			return err
+		}
+		out.Relations = map[string][]string{}
+		for rel, steps := range step.Relations {
+			for _, d := range primaryDocs(s.workflows[req.Workflow], repo, reqTasks, steps...) {
+				out.Relations[rel] = append(out.Relations[rel], d.ID)
+			}
+		}
+		return nil
 	})
-	if err != nil {
-		return nil, err
-	}
-	b, err := knowledge.Resolve(s.cfg.KnowledgeDir, scope)
-	if err != nil {
-		return nil, errf(http.StatusUnprocessableEntity, "context: %v", err)
-	}
-	return b, nil
+	return out, err
 }
 
 func (s *Server) startRun(r *http.Request, a actor) (any, error) {
@@ -292,8 +365,8 @@ func (s *Server) startRun(r *http.Request, a actor) (any, error) {
 			return err
 		}
 		err = tx.QueryRow(ctx, `
-			INSERT INTO agent_runs (task_id, worker_id, model, context_files) VALUES ($1, $2, $3, $4)
-			RETURNING id`, t.ID, a.workerID, in.Model, in.ContextFiles).Scan(&out.ID)
+			INSERT INTO agent_runs (task_id, worker_id, model, context_files, role) VALUES ($1, $2, $3, $4, $5)
+			RETURNING id`, t.ID, a.workerID, in.Model, in.ContextFiles, cmp.Or(in.Role, t.Role)).Scan(&out.ID)
 		if err != nil {
 			return err
 		}

@@ -1,0 +1,32 @@
+type: ux-spec
+title: UX / UI Specification
+id_prefix: UX
+question: How should the user experience the feature?
+audience: Client stakeholders, designers, frontend engineers, QA
+scopes: [project]
+folder: ux
+approval: required
+required_metadata: [owner]
+required_sections:
+  - Summary
+  - Users and Scenarios
+  - User Flows
+  - Information Architecture
+  - Screens and States
+  - Interaction and Validation Rules
+  - Content and Copy
+  - Accessibility
+  - Responsive Behaviour
+  - Analytics and Tracking
+  - Open Questions
+relationships:
+  satisfies: [prd]
+  depends_on: [adr, ux-spec]
+  derived_from: [change-request]
+  tested_by: [test-plan]
+  supersedes: [ux-spec]
+  references: ["*"]
+upstream:
+  - relationship: satisfies
+    types: [prd]
+    min: 1

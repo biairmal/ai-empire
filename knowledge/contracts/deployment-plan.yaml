@@ -1,0 +1,27 @@
+type: deployment-plan
+title: Deployment Plan
+id_prefix: DEP
+question: How is this release deployed safely, verified, and rolled back if needed?
+audience: Operations, release manager, client IT / change advisory board
+scopes: [project]
+folder: operations
+approval: required
+required_metadata: [owner]
+required_sections:
+  - Release Summary
+  - Components and Versions
+  - Pre-Deployment Checklist
+  - Deployment Steps
+  - Database Migrations
+  - Configuration Changes
+  - Verification
+  - Rollback Plan
+  - Communication Plan
+  - Post-Deployment Monitoring
+  - Sign-off
+relationships:
+  derived_from: [implementation-plan, technical-design, release-notes, change-request]
+  depends_on: [runbook, adr]
+  supersedes: [deployment-plan]
+  references: ["*"]
+upstream: []

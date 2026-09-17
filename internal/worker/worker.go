@@ -16,7 +16,6 @@ import (
 
 	"aiempire/internal/api"
 	"aiempire/internal/client"
-	"aiempire/internal/knowledge"
 	"aiempire/internal/policy"
 	"aiempire/internal/task"
 )
@@ -139,7 +138,7 @@ func (w *Worker) Step(ctx context.Context) (bool, error) {
 		return false, nil
 	}
 	t := cl.Task
-	log.Printf("task %d: claimed (%s, stage %s, attempt %d)", t.ID, t.Title, t.Stage, t.Attempts)
+	log.Printf("task %d: claimed (%s %s, %s, stage %s, attempt %d)", t.ID, t.Kind, t.Role, t.Title, t.Stage, t.Attempts)
 
 	tctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -155,9 +154,11 @@ func (w *Worker) Step(ctx context.Context) (bool, error) {
 	err := w.execute(tctx, *cl)
 	switch {
 	case err == nil:
-		log.Printf("task %d: stage %s done", t.ID, t.Stage)
+		log.Printf("task %d: done", t.ID)
 	case errors.Is(err, errParked):
 		log.Printf("task %d: waiting for human approval", t.ID)
+	case errors.Is(err, errRework):
+		log.Printf("task %d: AI review requested changes; back to the developer", t.ID)
 	default:
 		log.Printf("task %d: failed: %v", t.ID, err)
 		// Parent ctx: report even if the task ctx was cancelled. If the task was
@@ -169,10 +170,16 @@ func (w *Worker) Step(ctx context.Context) (bool, error) {
 	return true, nil
 }
 
+// errRework means the AI reviewer sent the task back to the developer.
+var errRework = errors.New("sent back for rework")
+
 func (w *Worker) execute(ctx context.Context, cl api.Claim) error {
 	t, repo := cl.Task, cl.Repository
 	if err := w.transition(ctx, t.ID, task.Running, ""); err != nil {
 		return err
+	}
+	if t.Kind != "code" {
+		return w.document(ctx, cl)
 	}
 	// One clone per repository; worktrees per task (spec §11A, §29).
 	repoDir := filepath.Join(w.cfg.Workspaces, cl.Project.Slug, repo.Name)
@@ -210,15 +217,15 @@ func (w *Worker) implement(ctx context.Context, cl api.Claim, base, dir string) 
 		return err
 	}
 
-	var bundle knowledge.Bundle
-	if err := w.c.Do(ctx, "GET", fmt.Sprintf("/tasks/%d/context", t.ID), nil, &bundle); err != nil {
-		return fmt.Errorf("load context: %w", err)
+	tc, err := w.context(ctx, t.ID)
+	if err != nil {
+		return err
 	}
-	if err := os.WriteFile(filepath.Join(dir, contextFile), []byte(bundle.Content), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, contextFile), []byte(tc.Content), 0o644); err != nil {
 		return err
 	}
 
-	agentSummary, err := w.runAgent(ctx, cl, dir, bundle.Files)
+	agentSummary, err := w.runAgent(ctx, cl, Job{Dir: dir, Prompt: developerPrompt(cl)}, t.Role, tc.Files)
 	if err != nil {
 		return err
 	}
@@ -255,13 +262,21 @@ func (w *Worker) implement(ctx context.Context, cl api.Claim, base, dir string) 
 		return err
 	}
 
-	diffstat, _ := git(ctx, dir, "diff", "--stat", "origin/"+repo.DefaultBranch+"..."+head)
+	diffRange := "origin/" + repo.DefaultBranch + "..." + head
+	var review string
+	if t.Review {
+		if review, err = w.review(ctx, cl, dir, diffRange, tc.Files); err != nil {
+			return err
+		}
+	}
+
+	diffstat, _ := git(ctx, dir, "diff", "--stat", diffRange)
 	if agentSummary == "" {
 		agentSummary = "(the agent gave no summary)"
 	}
-	summary := fmt.Sprintf("Merge %s (%s) into %s:%s for task #%d: %s\n\nAgent summary:\n%s\n\n%s",
+	summary := fmt.Sprintf("Merge %s (%s) into %s:%s for task #%d: %s\n\nAgent summary:\n%s\n\n%s%s",
 		branch, head[:min(12, len(head))], repo.Name, repo.DefaultBranch, t.ID, t.Title,
-		truncate(agentSummary, 3000), diffstat)
+		truncate(agentSummary, 3000), review, diffstat)
 	ok, _, err := w.authorize(ctx, t, policy.MergeProtected, task.StageMerge, summary, head)
 	if err != nil {
 		return err
@@ -270,6 +285,57 @@ func (w *Worker) implement(ctx context.Context, cl api.Claim, base, dir string) 
 		return errors.New("policy allowed an unreviewed merge to a protected branch; refusing")
 	}
 	return errParked
+}
+
+// review runs an independent, read-only reviewer agent on the change (spec §7 "AI Review", §26).
+// It returns the text for the approval request, or errRework if the task went back to the developer.
+func (w *Worker) review(ctx context.Context, cl api.Claim, dir, diffRange string, files []string) (string, error) {
+	t := cl.Task
+	if err := w.transition(ctx, t.ID, task.Reviewing, ""); err != nil {
+		return "", err
+	}
+	diff, err := git(ctx, dir, "diff", diffRange)
+	if err != nil {
+		return "", err
+	}
+	if err := writeJob(dir, cl, jobFile{Role: "reviewer"}); err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".empire", "review.diff"), []byte(diff), 0o644); err != nil {
+		return "", err
+	}
+	out, err := w.runAgent(ctx, cl, Job{Dir: dir, Prompt: reviewerPrompt(cl), ReadOnly: true}, "reviewer", files)
+	if err != nil {
+		return "", err
+	}
+	verdict := parseVerdict(out)
+	var reply api.ReviewReply
+	if err := w.c.Do(ctx, "POST", fmt.Sprintf("/tasks/%d/review", t.ID),
+		api.ReviewReport{Verdict: verdict, Summary: truncate(out, 20000)}, &reply); err != nil {
+		return "", err
+	}
+	if reply.Rework {
+		return "", errRework
+	}
+	note := ""
+	if verdict == "REQUEST_CHANGES" {
+		note = " (still requesting changes after the maximum review rounds; please look closely)"
+	}
+	return fmt.Sprintf("AI review: %s%s\n%s\n\n", verdict, note, truncate(out, 3000)), nil
+}
+
+func parseVerdict(s string) string {
+	lines := strings.Split(strings.TrimSpace(s), "\n")
+	for i := len(lines) - 1; i >= 0 && i >= len(lines)-5; i-- {
+		l := strings.ToUpper(strings.Trim(lines[i], " *`_#"))
+		switch {
+		case strings.HasPrefix(l, "VERDICT: APPROVE"):
+			return "APPROVE"
+		case strings.HasPrefix(l, "VERDICT: REQUEST_CHANGES"):
+			return "REQUEST_CHANGES"
+		}
+	}
+	return "NONE"
 }
 
 func (w *Worker) merge(ctx context.Context, cl api.Claim, base, dir string) error {
@@ -301,15 +367,37 @@ func (w *Worker) merge(ctx context.Context, cl api.Claim, base, dir string) erro
 	if _, err := git(ctx, dir, "push", "origin", "HEAD:refs/heads/"+repo.DefaultBranch); err != nil {
 		return err
 	}
-	return w.transition(ctx, t.ID, task.Completed, "")
+	merged, err := git(ctx, dir, "rev-parse", "HEAD")
+	if err != nil {
+		return err
+	}
+	// Files the merge brought into the default branch (for impact analysis, spec §37).
+	var files []string
+	if out, err := git(ctx, dir, "diff", "--name-only", "HEAD^1", "HEAD"); err == nil && out != "" {
+		for _, f := range strings.Split(out, "\n") {
+			if f = strings.TrimSpace(f); f != "" {
+				files = append(files, f)
+			}
+		}
+	}
+	return w.c.Do(ctx, "POST", fmt.Sprintf("/tasks/%d/transition", t.ID),
+		api.Transition{To: task.Completed, MergeSHA: merged, ChangedFiles: files}, nil)
+}
+
+func (w *Worker) context(ctx context.Context, id int64) (api.TaskContext, error) {
+	var tc api.TaskContext
+	if err := w.c.Do(ctx, "GET", fmt.Sprintf("/tasks/%d/context", id), nil, &tc); err != nil {
+		return tc, fmt.Errorf("load context: %w", err)
+	}
+	return tc, nil
 }
 
 // runAgent runs the agent once, records the run, and returns the agent's summary.
-func (w *Worker) runAgent(ctx context.Context, cl api.Claim, dir string, files []string) (string, error) {
+func (w *Worker) runAgent(ctx context.Context, cl api.Claim, job Job, role string, files []string) (string, error) {
 	t := cl.Task
 	var run api.ID
 	err := w.c.Do(ctx, "POST", fmt.Sprintf("/tasks/%d/runs", t.ID),
-		api.StartRun{Model: w.cfg.Agent.Name(), ContextFiles: files}, &run)
+		api.StartRun{Model: w.cfg.Agent.Name(), ContextFiles: files, Role: role}, &run)
 	if err != nil {
 		return "", err
 	}
@@ -320,7 +408,8 @@ func (w *Worker) runAgent(ctx context.Context, cl api.Claim, dir string, files [
 	if err != nil {
 		return "", err
 	}
-	res, runErr := w.cfg.Agent.Run(ctx, dir, prompt(cl), f)
+	job.Log = f
+	res, runErr := w.cfg.Agent.Run(ctx, job)
 	f.Close()
 
 	finish := api.FinishRun{ExitStatus: res.ExitStatus, LogPath: logPath, Tokens: res.Tokens, CostUSD: res.CostUSD,
@@ -375,28 +464,4 @@ func orParked(err error) error {
 		return err
 	}
 	return errParked
-}
-
-func prompt(cl api.Claim) string {
-	t, p, repo := cl.Task, cl.Project, cl.Repository
-	var b strings.Builder
-	fmt.Fprintf(&b, "Task #%d: %s\n\n", t.ID, t.Title)
-	fmt.Fprintf(&b, "You are the Developer agent for project %q, repository %q (stack: %s).\n\n", p.Name, repo.Name, repo.Stack)
-	if t.Description != "" {
-		fmt.Fprintf(&b, "## Request\n\n%s\n\n", t.Description)
-	}
-	if t.Feedback != "" {
-		fmt.Fprintf(&b, "## Reviewer feedback on your previous attempt (address this)\n\n%s\n\n", t.Feedback)
-	}
-	fmt.Fprintf(&b, `## Rules
-
-- Read %s in the current directory first: it holds the engineering rules and project knowledge for this task.
-- Work only inside the current directory.
-- Implement the task completely, with tests where it makes sense.
-- Do not run git commands, commit, or push; the worker handles version control.
-- Do not edit %s.
-- If an approved requirement or design looks wrong, say so in your summary instead of silently changing it.
-- End with a short summary of what you changed and why.
-`, contextFile, contextFile)
-	return b.String()
 }

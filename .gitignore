@@ -12,3 +12,6 @@
 
 # Obsidian local state
 .obsidian/
+
+# Client document exports
+/exports/

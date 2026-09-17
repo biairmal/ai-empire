@@ -1,6 +1,7 @@
 ---
 type: guideline
 id: GL-002
+title: Security Principles
 status: approved
 version: 1
 depends_on:
@@ -18,3 +19,9 @@ depends_on:
 7. **Audit everything that matters.** State changes, approvals, and privileged actions are logged append-only with the actor recorded.
 8. **Global rules are guarded.** Changes to global knowledge or security policy go through human review.
 9. **Validate at trust boundaries.** Treat input from agents, external tools, and users as untrusted until validated.
+
+<!-- relations:start — generated from the front matter by the platform; do not edit -->
+## Relations
+
+- **Depends on:** [[engineering-principles|GL-001 · Engineering Principles]]
+<!-- relations:end -->

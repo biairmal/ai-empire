@@ -23,21 +23,26 @@ var slugRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
 
 // Scope says which knowledge a task may see.
 type Scope struct {
-	Stack   string   // from the task's repository
+	Stacks  []string // the task repository's stack; all project stacks for document tasks
 	Client  string   // project's client slug; "" = no client knowledge at all
 	Project string   // project slug
+	Role    string   // agent role; loads roles/<role>.md ("" = none)
 	Docs    []string // project-relative docs listed on the task
 }
 
 // Resolve builds a context bundle:
-// global → stacks/<stack> → clients/<client> → listed project docs.
-// Sibling stacks, other clients and other projects are never read (spec §11B, §21).
+// global → roles/<role> → stacks/<stack>… → clients/<client> → listed project docs.
+// Other stacks, other clients and other projects are never read (spec §11B, §21).
 func Resolve(root string, s Scope) (Bundle, error) {
-	if !slugRe.MatchString(s.Stack) || !slugRe.MatchString(s.Project) ||
-		(s.Client != "" && !slugRe.MatchString(s.Client)) {
-		return Bundle{}, fmt.Errorf("invalid scope stack=%q client=%q project=%q", s.Stack, s.Client, s.Project)
+	valid := slugRe.MatchString(s.Project) && (s.Client == "" || slugRe.MatchString(s.Client)) &&
+		(s.Role == "" || slugRe.MatchString(s.Role))
+	for _, st := range s.Stacks {
+		valid = valid && slugRe.MatchString(st)
 	}
-	stack, project, docs := s.Stack, s.Project, s.Docs
+	if !valid {
+		return Bundle{}, fmt.Errorf("invalid scope stacks=%q client=%q project=%q role=%q", s.Stacks, s.Client, s.Project, s.Role)
+	}
+	project, docs := s.Project, s.Docs
 	var b Bundle
 	var sb strings.Builder
 	add := func(rel string, data []byte) {
@@ -45,7 +50,13 @@ func Resolve(root string, s Scope) (Bundle, error) {
 		fmt.Fprintf(&sb, "## File: %s\n\n%s\n\n", rel, strings.TrimSpace(string(data)))
 	}
 
-	dirs := []string{"global", "stacks/" + stack}
+	dirs := []string{"global"}
+	if s.Role != "" {
+		dirs = append(dirs, "roles/"+s.Role+".md")
+	}
+	for _, st := range s.Stacks {
+		dirs = append(dirs, "stacks/"+st)
+	}
 	if s.Client != "" {
 		dirs = append(dirs, "clients/"+s.Client)
 	}

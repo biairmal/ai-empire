@@ -287,13 +287,15 @@ func (s *Server) listRepositories(r *http.Request, a actor) (any, error) {
 }
 
 // scopeFor is the knowledge a task in this project+repository may see.
-func scopeFor(ctx context.Context, q querier, projectID, repoID int64, docs []string) (knowledge.Scope, error) {
-	sc := knowledge.Scope{Docs: docs}
+// A code task sees its repository's stack; a document task (repoID nil) sees
+// the stacks of all the project's repositories.
+func scopeFor(ctx context.Context, q querier, projectID int64, repoID *int64, role string, docs []string) (knowledge.Scope, error) {
+	sc := knowledge.Scope{Docs: docs, Role: role}
 	err := q.QueryRow(ctx, `
-		SELECT r.stack, p.slug, coalesce(c.slug, '')
-		FROM projects p
-		JOIN repositories r ON r.project_id = p.id
-		LEFT JOIN clients c ON c.id = p.client_id
-		WHERE p.id = $1 AND r.id = $2`, projectID, repoID).Scan(&sc.Stack, &sc.Project, &sc.Client)
+		SELECT p.slug, coalesce(c.slug, ''),
+		       coalesce((SELECT array_agg(DISTINCT r.stack ORDER BY r.stack) FROM repositories r
+		                 WHERE r.project_id = p.id AND ($2::bigint IS NULL OR r.id = $2)), '{}')
+		FROM projects p LEFT JOIN clients c ON c.id = p.client_id
+		WHERE p.id = $1`, projectID, repoID).Scan(&sc.Project, &sc.Client, &sc.Stacks)
 	return sc, err
 }

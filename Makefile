@@ -3,7 +3,7 @@ export
 
 EMPIRE_TEST_DATABASE_URL ?= postgres://$(or $(POSTGRES_USER),empire):$(or $(POSTGRES_PASSWORD),empire)@localhost:$(or $(POSTGRES_PORT),5433)/empire_test?sslmode=disable
 
-.PHONY: up down migrate migrate-down test build run-cp run-worker
+.PHONY: up down migrate migrate-down test build run-cp run-worker docs-check hooks
 
 up:
 	docker compose up -d --wait postgres
@@ -30,3 +30,11 @@ run-cp:
 
 run-worker:
 	go run ./cmd/worker
+
+# Validate the knowledge repository without the control plane (also run by the pre-commit hook and CI).
+docs-check:
+	go run ./cmd/empire docs validate -local
+
+# Install the git hooks (validate knowledge on commit, refresh the graph index after).
+hooks:
+	git config core.hooksPath scripts/hooks

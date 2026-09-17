@@ -1,0 +1,27 @@
+type: change-request
+title: Change Request
+id_prefix: CR
+question: What needs to change in approved work, why, and what does it affect?
+audience: Client stakeholders, project owner, delivery team
+scopes: [project]
+folder: changes
+approval: required
+required_metadata: [owner]
+required_sections:
+  - Summary
+  - Reason for Change
+  - Current Behaviour
+  - Proposed Change
+  - Affected Artifacts
+  - Impact Assessment
+  - Options Considered
+  - Recommendation
+  - Rollback and Contingency
+relationships:
+  affects: ["*"]
+  derived_from: ["*"]
+  references: ["*"]
+upstream:
+  - relationship: affects
+    types: ["*"]
+    min: 1

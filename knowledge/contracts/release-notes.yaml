@@ -1,0 +1,22 @@
+type: release-notes
+title: Release Notes
+id_prefix: REL
+question: What changed in this release, and what do users need to do?
+audience: Client stakeholders, end users, support teams
+scopes: [project]
+folder: releases
+approval: optional
+required_metadata: [owner]
+required_sections:
+  - Release Summary
+  - Highlights
+  - Improvements
+  - Bug Fixes
+  - Breaking Changes and Migration
+  - Known Issues
+  - Upgrade Instructions
+relationships:
+  documents: ["*"]
+  derived_from: [change-request, prd, implementation-plan]
+  references: ["*"]
+upstream: []

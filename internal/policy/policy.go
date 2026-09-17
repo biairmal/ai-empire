@@ -64,9 +64,10 @@ func Requires(autonomy, action string) bool {
 func Known(action string) bool { return low[action] || medium[action] || high[action] }
 
 // CanDecide enforces "AI cannot approve its own work" (spec §9, §26):
-// only a human may decide, and never the actor that made the request.
+// only a human may decide, and an AI actor never decides its own request.
+// A human owner may approve what they submitted themselves: they are the final authority.
 func CanDecide(requestedBy, decidedBy string) bool {
-	return decidedBy != requestedBy && IsHuman(decidedBy)
+	return IsHuman(decidedBy) && (decidedBy != requestedBy || IsHuman(requestedBy))
 }
 
 // IsHuman reports whether an actor string ("owner", "worker:3") is a human.

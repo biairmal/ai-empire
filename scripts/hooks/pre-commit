@@ -1,0 +1,10 @@
+#!/bin/sh
+# Refuse commits that break the knowledge repository (spec §18).
+# Installed with: make hooks
+if git diff --cached --name-only | grep -q '^knowledge/'; then
+    echo "pre-commit: validating knowledge documents..."
+    go run ./cmd/empire docs validate -local || {
+        echo "pre-commit: fix the documents above, or commit with --no-verify if you really must." >&2
+        exit 1
+    }
+fi

@@ -49,7 +49,11 @@ func (s *Server) decide(r *http.Request, a actor) (any, error) {
 		return nil, errf(http.StatusBadRequest, "request-changes needs a comment")
 	}
 
-	return nil, s.tx(r.Context(), func(tx pgx.Tx) error {
+	// Document decisions rewrite knowledge files; keep them in step with the database.
+	s.kmu.Lock()
+	defer s.kmu.Unlock()
+	st := s.stage()
+	err = s.tx(r.Context(), func(tx pgx.Tx) error {
 		ctx := r.Context()
 		req, err := one[api.ApprovalRequest](ctx, tx, `SELECT * FROM approval_requests WHERE id = $1 FOR UPDATE`, id)
 		if err != nil {
@@ -72,7 +76,11 @@ func (s *Server) decide(r *http.Request, a actor) (any, error) {
 		if err := audit(ctx, tx, a, "approval.decide", approvalRef(id), M{"decision": status, "comment": in.Comment}); err != nil {
 			return err
 		}
-		if req.SubjectType != "task" {
+		switch req.SubjectType {
+		case "document":
+			return s.decideDocuments(ctx, tx, a, req, status, in.Comment, st)
+		case "task":
+		default:
 			return nil
 		}
 
@@ -98,8 +106,14 @@ func (s *Server) decide(r *http.Request, a actor) (any, error) {
 			_, err = tx.Exec(ctx, `UPDATE tasks SET attempts = 0, stage = $2, feedback = $3 WHERE id = $1`,
 				t.ID, task.StageImplement, in.Comment)
 		case "REJECTED":
-			err = move(ctx, tx, a, t, task.Cancelled, note)
+			if err = move(ctx, tx, a, t, task.Cancelled, note); err == nil && t.RequestID != nil {
+				err = s.advance(ctx, tx, a, *t.RequestID) // a rejected merge cancels its request
+			}
 		}
 		return err
 	})
+	if err != nil {
+		st.rollback()
+	}
+	return nil, err
 }

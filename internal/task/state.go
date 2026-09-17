@@ -31,7 +31,7 @@ var transitions = map[string][]string{
 	Running:         {Testing, Reviewing, WaitingForHuman, Completed, Pending, Failed, Cancelled},
 	Testing:         {Running, Reviewing, WaitingForHuman, Completed, Pending, Failed, Cancelled},
 	Reviewing:       {Running, WaitingForHuman, Completed, Pending, Failed, Cancelled},
-	WaitingForHuman: {Pending, Cancelled},
+	WaitingForHuman: {Pending, Cancelled, Completed}, // Completed: a document approval finishes the task
 	Failed:          {Pending},
 	Completed:       {},
 	Cancelled:       {},
