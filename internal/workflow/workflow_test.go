@@ -21,7 +21,7 @@ func TestShippedWorkflowsLoad(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"feature", "quick-fix", "change"} {
+	for _, name := range []string{"feature", "feature-ui", "quick-fix", "change", "e2e-tests"} {
 		if _, ok := wfs[name]; !ok {
 			t.Errorf("workflow %s missing", name)
 		}

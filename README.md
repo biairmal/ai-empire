@@ -80,7 +80,7 @@ PENDING → ASSIGNED → RUNNING ─ agent edits worktree (branch ai/task-N)
 - **Authority.** Workers ask `POST /tasks/{id}/authorize` before gated actions. Policy is in [internal/policy](internal/policy/policy.go): presets per project `autonomy_level`, and high-risk actions always go to a human. Only the owner token can decide approvals; an AI never approves anything (the owner may approve documents they wrote).
 - **Crash safety.** All state is in Postgres. A worker that re-registers, or misses heartbeats for `EMPIRE_STALE_AFTER`, has its in-flight tasks requeued, and a task fails after 3 attempts.
 - **Organization.** Client (optional) → projects → repositories. Each task targets one repository. Dependencies (`-after`) can cross projects, but never clients. There is one merge gate per repository.
-- **Context.** The control plane builds `.empire-context.md` from `knowledge/global`, the agent's role, `knowledge/stacks/<repository stack>`, `knowledge/clients/<project's client>` (if any), and the task's project documents plus the documents they link to, and nothing else. The file is git-excluded.
+- **Context.** The control plane builds `.empire-context.md` from `knowledge/global`, the agent's role, `knowledge/stacks/<repository stack>`, `knowledge/clients/<project's client>` (if any), `knowledge/projects/<project>/guidelines`, and the task's project documents plus the documents they link to, and nothing else. The file is git-excluded.
 - **Isolation.** One clone per repository, and one worktree per task, under `EMPIRE_WORKSPACES/<project>/<repo>/`. The agent runs with `--permission-mode acceptEdits` (it can edit files but not run shell commands), and `EMPIRE_*` and `DATABASE_URL` are stripped from its environment.
 - **Audit.** Every mutation writes `audit_log` in the same transaction. The table is append-only (enforced by a trigger).
 
@@ -100,7 +100,7 @@ internal/task/           task state machine
 internal/knowledge/      context resolver
 migrations/              NNNNNN_name.up.sql / .down.sql (golang-migrate)
 knowledge/               Markdown knowledge repo (open in Obsidian): rules, roles, templates, contracts, project documents
-workflows/               feature, quick-fix, change (YAML)
+workflows/               feature, feature-ui, quick-fix, change, e2e-tests (YAML)
 scripts/hooks/           git hooks (`make hooks`)
 ```
 

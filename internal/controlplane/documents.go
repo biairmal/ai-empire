@@ -2,6 +2,7 @@ package controlplane
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -199,6 +200,23 @@ func (s *Server) submitDocument(r *http.Request, a actor) (any, error) {
 				return err
 			}
 			projectID = &p.ID
+		}
+		// An owner submission edited after it was submitted can no longer be decided;
+		// resubmitting closes that stale request. Unchanged content stays a 409 below.
+		var staleID int64
+		err = tx.QueryRow(ctx, `
+			UPDATE approval_requests SET status = 'CHANGES_REQUESTED'
+			WHERE subject_type = 'document' AND subject_ref = $1 AND gate = $2
+			  AND status = 'PENDING_APPROVAL' AND task_id IS NULL AND subject_version <> $3
+			RETURNING id`,
+			d.Key().String(), documentGate, fmt.Sprintf("v%d@%s", d.Version, d.Hash())).Scan(&staleID)
+		switch {
+		case err == nil:
+			if err := audit(ctx, tx, a, "approval.superseded", approvalRef(staleID), M{"reason": "document resubmitted after an edit"}); err != nil {
+				return err
+			}
+		case !errors.Is(err, pgx.ErrNoRows):
+			return err
 		}
 		out, err = s.openDocumentApproval(ctx, tx, a, repo, env, []*docs.Doc{d}, projectID, nil, "")
 		if err != nil {

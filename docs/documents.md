@@ -29,6 +29,7 @@ Each document answers **one** question. If you're unsure, find your question in 
 | How do we run and fix it in production? | **Operations Runbook** | `RB-001` | `operations/` | You | Optional |
 | What needs to change in approved work? | **Change Request** | `CR-001` | `changes/` | Product Manager agent or you | Required |
 | What changed in this release? | **Release Notes** | `REL-001` | `releases/` | You | Optional |
+| Which tools and conventions does this project use? | **Guideline** | `GL-001` | `guidelines/` | You | Required (loaded into every task of the project) |
 
 Folders are relative to `knowledge/projects/<project>/`. IDs are numbered per project, so every project has its own `PRD-001`.
 

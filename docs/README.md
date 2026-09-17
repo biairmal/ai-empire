@@ -340,7 +340,7 @@ AI Empire/
 ├── .github/workflows/ci.yml    CI: vet, tests, offline document validation
 ├── scripts/hooks/              git hooks (pre-commit validate, post-commit reindex)
 ├── migrations/                 database schema (SQL)
-├── workflows/                  feature.yaml, quick-fix.yaml, change.yaml
+├── workflows/                  feature.yaml, feature-ui.yaml, quick-fix.yaml, change.yaml, e2e-tests.yaml
 ├── cmd/
 │   ├── controlplane/           main() for the control plane
 │   ├── worker/                 main() for the worker

@@ -11,7 +11,7 @@ global/              → every task
 roles/               → tasks performed in that role (product-manager, architect, …)
 stacks/<stack>/      → tasks whose repository is on that stack
 clients/<slug>/      → every project of that client, and nothing else
-projects/<slug>/     → that project only (all its repositories)
+projects/<slug>/     → that project only (all its repositories); guidelines/ is loaded for every task, other documents only when a task lists them
 ```
 
 Repository-specific knowledge lives in the repository itself (README, CLAUDE.md, docs/).

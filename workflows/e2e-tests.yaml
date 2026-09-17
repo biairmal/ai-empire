@@ -1,0 +1,10 @@
+# End-to-end tests for already-implemented requirements, in one repository.
+# Requires a repository on the request (-repo NAME); name the requirements in -desc (e.g. "covers: PRD-001 US-04").
+# The tool and layout come from the project's testing guideline, not from this workflow.
+name: e2e-tests
+description: Tester writes end-to-end tests for existing requirements in one repository, AI-reviewed, then the merge gate.
+steps:
+  - name: implement
+    kind: code
+    role: tester
+    review: true

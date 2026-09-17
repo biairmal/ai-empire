@@ -1,0 +1,40 @@
+# New user-facing feature: like `feature`, plus a UX / UI Specification before the technical design.
+name: feature-ui
+description: User-facing feature with PRD, UX specification, design, and plan approval before reviewed code.
+steps:
+  - name: prd
+    kind: document
+    doc_type: prd
+    role: product-manager
+
+  - name: ux
+    kind: document
+    doc_type: ux-spec
+    role: ux-designer
+    inputs: [prd]
+    relations:
+      satisfies: [prd]
+
+  - name: design
+    kind: document
+    doc_type: technical-design
+    role: architect
+    inputs: [prd, ux]
+    extra_types: [adr]
+    relations:
+      satisfies: [prd]
+
+  - name: plan
+    kind: plan
+    doc_type: implementation-plan
+    role: planner
+    inputs: [prd, ux, design]
+    gate: true
+    relations:
+      derived_from: [design]
+
+  - name: implement
+    kind: code
+    role: developer
+    inputs: [prd, ux, design, plan]
+    review: true

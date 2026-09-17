@@ -3,8 +3,8 @@ title: Engineering Guideline
 id_prefix: GL
 question: Which rule must every task in this scope follow?
 audience: Engineers and AI agents
-scopes: [global, stack, client]
-folder: ""
+scopes: [global, stack, client, project]
+folder: guidelines        # projects only: projects/<slug>/guidelines/
 approval: required
 required_metadata: []
 required_sections: []

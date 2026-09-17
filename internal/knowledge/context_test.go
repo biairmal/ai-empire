@@ -22,6 +22,8 @@ func fixture(t *testing.T) string {
 		"projects/alpha/requirements/prd.md": "ALPHA-PRD",
 		"projects/alpha/api/unlisted.md":     "ALPHA-UNLISTED",
 		"projects/beta/secret.md":            "BETA-SECRET",
+		"projects/alpha/guidelines/tools.md": "ALPHA-GUIDE",
+		"projects/beta/guidelines/tools.md":  "BETA-GUIDE",
 	} {
 		p := filepath.Join(root, rel)
 		os.MkdirAll(filepath.Dir(p), 0o755)
@@ -57,9 +59,9 @@ func TestResolveIsolation(t *testing.T) {
 		t.Fatal(err)
 	}
 	check(t, b,
-		[]string{"global/principles.md", "roles/developer.md", "stacks/go/testing.md", "clients/acme/conventions.md", "projects/alpha/requirements/prd.md"},
-		[]string{"GLOBAL", "DEV-ROLE", "GO-STACK", "ACME-CLIENT", "ALPHA-PRD"},
-		[]string{"NAV", "ARCH-ROLE", "DOTNET-STACK", "GLOBEX-CLIENT", "ALPHA-UNLISTED", "BETA-SECRET"})
+		[]string{"global/principles.md", "roles/developer.md", "stacks/go/testing.md", "clients/acme/conventions.md", "projects/alpha/guidelines/tools.md", "projects/alpha/requirements/prd.md"},
+		[]string{"GLOBAL", "DEV-ROLE", "GO-STACK", "ACME-CLIENT", "ALPHA-GUIDE", "ALPHA-PRD"},
+		[]string{"NAV", "ARCH-ROLE", "DOTNET-STACK", "GLOBEX-CLIENT", "ALPHA-UNLISTED", "BETA-SECRET", "BETA-GUIDE"})
 
 	// A client-less project gets no client knowledge at all.
 	b, err = Resolve(root, Scope{Stacks: []string{"dotnet"}, Project: "alpha"})
@@ -67,7 +69,7 @@ func TestResolveIsolation(t *testing.T) {
 		t.Fatal(err)
 	}
 	check(t, b,
-		[]string{"global/principles.md", "stacks/dotnet/efcore.md"},
+		[]string{"global/principles.md", "stacks/dotnet/efcore.md", "projects/alpha/guidelines/tools.md"},
 		[]string{"DOTNET-STACK"},
 		[]string{"GO-STACK", "ACME-CLIENT", "GLOBEX-CLIENT", "ALPHA-PRD"})
 

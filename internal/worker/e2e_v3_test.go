@@ -443,6 +443,26 @@ func TestChangeWorkflowAndOwnerDocuments(t *testing.T) {
 	raw, _ = os.ReadFile(rbFile)
 	os.WriteFile(rbFile, append(raw, []byte("\nlate edit\n")...), 0o644)
 	expectStatus(t, s.owner, "POST", "/approvals/"+strconv.FormatInt(ap.ID, 10)+"/approve", api.Decision{}, 409)
+	// ...and resubmitting replaces the stale approval, so the new content can be decided.
+	stale := ap.ID
+	do(t, s.owner, "POST", "/documents/submit", api.DocumentRef{Ref: info.Path}, &ap)
+	if ap.ID == stale {
+		t.Fatal("resubmission opened no new approval")
+	}
+	var old api.ApprovalRequest
+	do(t, s.owner, "GET", "/approvals/"+strconv.FormatInt(stale, 10), nil, &old)
+	if old.Status != "CHANGES_REQUESTED" {
+		t.Errorf("stale approval status = %s", old.Status)
+	}
+	s.decide(ap.ID, "approve", "approved after resubmission")
+	// Resubmitting unchanged content while it is pending is still a conflict.
+	do(t, s.owner, "POST", "/documents", api.NewDocument{Project: "guest", Type: "runbook", Title: "Ops two", Owner: "Bia"}, &info)
+	rbFile = filepath.Join(s.kdir, filepath.FromSlash(info.Path))
+	raw, _ = os.ReadFile(rbFile)
+	filled, _ = docs.Example(info.Path, raw)
+	os.WriteFile(rbFile, filled.Bytes(), 0o644)
+	do(t, s.owner, "POST", "/documents/submit", api.DocumentRef{Ref: info.Path}, &ap)
+	expectStatus(t, s.owner, "POST", "/documents/submit", api.DocumentRef{Ref: info.Path}, 409)
 
 	// Audit trail covers document lifecycles.
 	var entries []api.AuditEntry

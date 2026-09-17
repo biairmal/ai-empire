@@ -10,6 +10,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -31,7 +32,7 @@ type Scope struct {
 }
 
 // Resolve builds a context bundle:
-// global → roles/<role> → stacks/<stack>… → clients/<client> → listed project docs.
+// global → roles/<role> → stacks/<stack>… → clients/<client> → projects/<project>/guidelines → listed project docs.
 // Other stacks, other clients and other projects are never read (spec §11B, §21).
 func Resolve(root string, s Scope) (Bundle, error) {
 	valid := slugRe.MatchString(s.Project) && (s.Client == "" || slugRe.MatchString(s.Client)) &&
@@ -46,6 +47,9 @@ func Resolve(root string, s Scope) (Bundle, error) {
 	var b Bundle
 	var sb strings.Builder
 	add := func(rel string, data []byte) {
+		if slices.Contains(b.Files, rel) { // a listed doc may also be a project guideline
+			return
+		}
 		b.Files = append(b.Files, rel)
 		fmt.Fprintf(&sb, "## File: %s\n\n%s\n\n", rel, strings.TrimSpace(string(data)))
 	}
@@ -60,6 +64,8 @@ func Resolve(root string, s Scope) (Bundle, error) {
 	if s.Client != "" {
 		dirs = append(dirs, "clients/"+s.Client)
 	}
+	// Project guidelines (tooling, conventions) apply to every task of the project.
+	dirs = append(dirs, "projects/"+project+"/guidelines")
 	for _, dir := range dirs {
 		err := filepath.WalkDir(filepath.Join(root, dir), func(p string, d fs.DirEntry, err error) error {
 			if err != nil {

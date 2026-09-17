@@ -37,6 +37,22 @@ completed
 empire request create -project guest-management -desc "Guests show a QR code at the door; staff scan it to check them in." "QR ticket validation"
 ```
 
+### `feature-ui`: a user-facing feature
+
+Same as `feature`, plus a **UX Designer** step between the PRD and the design: `prd → ux (UX-00N, satisfies the PRD) → design → plan → implement`. The architect and the planner get the UX specification as input. The design tool the UX Designer links to comes from the project's guidelines.
+
+```powershell
+empire request create -project guest-management -workflow feature-ui -desc "Staff manage the guest list of an event." "Guest list screens"
+```
+
+### `e2e-tests`: end-to-end tests for existing requirements
+
+One **Tester** code task in the repository you name, then AI review and the merge gate. Name the requirements to cover in the description. The test tool, layout, and run command come from the project's testing guideline.
+
+```powershell
+empire request create -project guest-management -workflow e2e-tests -repo backend -desc "covers: PRD-001 US-04" "E2E tests for scans"
+```
+
 ### `quick-fix`: a small, well-understood change
 
 No documents. One code task in the repository you name, then AI review, then the merge gate.
