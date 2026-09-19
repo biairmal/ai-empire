@@ -178,38 +178,39 @@ Client → projects → repositories. A client (optional) is the confidentiality
 
 ---
 
-## V2 — Persistent AI Interface (§41) — *deferred*
-> Not needed yet. The `empire` CLI is the interface for now. V3 does not depend on V2. Revisit when you want phone access, notifications, or a remote worker.
-
+## V2 — Persistent AI Interface (§41)
 **Goal:** manage development from phone or laptop without operating the infrastructure yourself.
 
-### M2.1 MCP server over the Control Plane API (§5, §33)
-- [ ] Expose the §33 operations as MCP tools (thin wrappers over the HTTP API, with no direct DB access)
-- [ ] Give Hermes its own API token so the audit log shows `actor=hermes`
-- [ ] Hermes can't approve on its own. Approval tools require a human-confirmed action (e.g. Hermes relays your explicit "approve", and the decision records `decided_by=owner via hermes`)
+Reference: [docs/apps.md §6](docs/apps.md#6-v2-hermes-notifications-remote-workers). Tested by [e2e_v2_test.go](internal/worker/e2e_v2_test.go).
 
-**Done when:** from an MCP client you can list projects, create a task, and approve a merge.
+### M2.1 MCP server over the Control Plane API (§5, §33)
+- [x] Expose the §33 operations as MCP tools: `empire-mcp` ([internal/mcp](internal/mcp/mcp.go)), stdio, stdlib JSON-RPC, thin wrappers over the HTTP API, no DB access
+- [x] Give Hermes its own API token (`EMPIRE_HERMES_TOKEN`) so the audit log shows `actor=hermes`. Hermes gets an `operator` role: reads, tasks, requests, audit, decisions. Workers lose read access to the API (least privilege)
+- [x] Hermes can't approve on its own. *Decision:* a confirm code (HMAC of the approval id with the owner token) reaches only the owner, in the approval notification. Hermes must pass it on, and the decision records `decided_by=owner via hermes`
+- [ ] *(defer)* Remote MCP transport (Streamable HTTP + OAuth) for claude.ai connectors. Add it if stdio on an always-on machine isn't enough
+
+**Done when:** from an MCP client you can list projects, create a task, and approve a merge. ✅ (in the test)
 
 ### M2.2 Hermes operator
-- [ ] Pick the Hermes runtime (e.g. Claude with the MCP server attached, via a chat app or bot)
-- [ ] Natural-language task creation: "add X to project Y" → `create_task` (project resolved by name)
-- [ ] "What is currently running?" → a concise summary from `list_tasks` + `list_workers` (§36)
-- [ ] "Why did…?" → read the `agent_run` log and linked docs
-- [ ] Hermes memory stores only personal/operational notes, never task state (§31)
+- [x] Runtime: any MCP client (Claude Code / Claude Desktop) with `empire-mcp` attached, running on an always-on machine. Setup in docs
+- [x] Natural-language task creation: "add X to project Y" → `create_task` (project resolved by slug, id or name)
+- [x] "What is currently running?" → the `status` tool (in-flight, queued, waiting for you, workers) (§36)
+- [x] "Why did…?" → `get_task` includes each run's summary and `log_tail` (last 8 KB of the agent log, stored on the control plane so it works for remote workers), plus `audit` and `trace`
+- [x] Hermes memory stores only personal/operational notes, never task state (§31): stated in the server's MCP `instructions`
 
 **Done when:** you complete the V1 demo entirely through Hermes from your phone.
 
 ### M2.3 Notifications (§39)
-- [ ] One outbound channel (Telegram, Slack, email, or ntfy; pick one)
-- [ ] Emit on: approval required, task failed, worker stale, repeated test failures, work completed
-- [ ] Notification = an outbox table plus a sender loop, so a restart doesn't lose messages
+- [x] One outbound channel: ntfy (`EMPIRE_NTFY_URL`, optional `EMPIRE_NTFY_TOKEN`)
+- [x] Emit on: approval required (with the confirm code), task failed ("failed again (N times)" flags repeated test failures), worker offline, standalone task completed, request completed
+- [x] Outbox: `audit()` adds a `notifications` row in the event's transaction; a sender loop retries with backoff and expires rows after a day
 
 **Done when:** an approval request pings your phone within seconds.
 
 ### M2.4 Remote worker
-- [ ] Run the worker on a Mac Mini / mini PC against the remote control plane
-- [ ] Per-worker token; secure transport (Tailscale/WireGuard is simplest)
-- [ ] Worker gets only the repo credentials for the projects it's allowed to serve (§34)
+- [ ] Run the worker on a Mac Mini / mini PC against the remote control plane (no code needed: steps in docs)
+- [x] Per-worker token: `empire worker add -name N [-project P]...`. Bound to the name, not hijackable with the shared token; the shared token becomes optional. Secure transport: Tailscale/WireGuard (docs)
+- [x] Worker limited to projects (`workers.project_ids`), so it only needs repo credentials for those (§34)
 
 **Done when:** a task gets claimed and completed by the remote machine while your laptop is off.
 
@@ -354,7 +355,7 @@ Manage agent slots, requests, approvals and documents from a browser. One machin
 - [ ] Polls every few seconds; server-sent events only if polling proves too slow
 
 **Security (prerequisite before exposing it)**
-- [ ] Per-machine tokens (M2.4 / Cross-cutting Security); the owner token never reaches a machine or a coding agent
+- [ ] Per-machine tokens (done in M2.4 as per-worker tokens); the owner token never reaches a machine or a coding agent
 - [ ] Control plane reachable only over Tailscale/WireGuard or behind TLS
 
 **Done when:** one VPS runs three agent slots created from the browser (an architect slot on a strong model, two developer slots on a cheap one). A request sent from the browser produces a PRD you read and approve in the console; its tasks run in parallel on different slots, each visible with its slot and model; a client project's task is never claimed by a slot on a provider that client does not allow; and you approve the merges without touching the CLI.
@@ -364,7 +365,7 @@ Manage agent slots, requests, approvals and documents from a browser. One machin
 ## Cross-cutting (start early, keep going)
 
 ### Security (§34)
-- [ ] Separate tokens for owner, Hermes, and each worker; per-token scopes
+- [x] Separate tokens for owner, Hermes, and each worker; per-token scopes (owner / operator / worker roles)
 - [ ] Secrets never go into `.empire-context.md` or agent logs; scrub logs
 - [ ] Protected branches on the remote (GitHub/GitLab) as a second line of defense
 - [ ] Production deploy credentials are never available to workers without an approved gate
@@ -376,7 +377,7 @@ Manage agent slots, requests, approvals and documents from a browser. One machin
 
 ### Testing
 - [x] Unit tests for the state machine, policy, context isolation, validator, workflows, graph expansion
-- [x] End-to-end tests with a fake agent: V1 ([e2e_test.go](internal/worker/e2e_test.go)) and V3 workflows ([e2e_v3_test.go](internal/worker/e2e_v3_test.go))
+- [x] End-to-end tests with a fake agent: V1 ([e2e_test.go](internal/worker/e2e_test.go)), V2 ([e2e_v2_test.go](internal/worker/e2e_v2_test.go)) and V3 workflows ([e2e_v3_test.go](internal/worker/e2e_v3_test.go))
 
 ---
 
@@ -390,7 +391,7 @@ Manage agent slots, requests, approvals and documents from a browser. One machin
 | M1.7 | Coding agent | **V1: task → code → tests → merge approval** |
 | M1.8 | Clients & multi-repo projects | Client → projects → repos; client knowledge isolated per client |
 | M1.9 | V1 polish | Edit repos/projects; agent summary in approvals |
-| M2 | Hermes + notifications *(deferred)* | **V2: run it all from your phone** |
+| M2 | Hermes + notifications | **V2: run it all from your phone** |
 | M3.1–3.4 | Contracts, validation, workflows ✅ | **PRD → design → tasks pipeline with gates** |
 | M3.5–3.9 | Roles, graph, impact, hand-over ✅ | **V3: traceability + impact analysis** |
 | M4.1 | Web console & agent slots | Slots created in the browser run tasks in parallel on one VPS, within provider policy |

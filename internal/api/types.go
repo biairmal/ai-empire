@@ -82,6 +82,8 @@ type Worker struct {
 	Capabilities    []string  `json:"capabilities" db:"capabilities"`
 	Status          string    `json:"status" db:"status"`
 	LastHeartbeatAt time.Time `json:"last_heartbeat_at" db:"last_heartbeat_at"`
+	TokenHash       *string   `json:"-" db:"token_hash"`
+	ProjectIDs      []int64   `json:"project_ids" db:"project_ids"` // empty = any project
 	CreatedAt       time.Time `json:"created_at" db:"created_at"`
 }
 
@@ -99,6 +101,7 @@ type AgentRun struct {
 	CostUSD      float64    `json:"cost_usd" db:"cost_usd"`
 	Summary      string     `json:"summary" db:"summary"` // what the agent says it did
 	Role         string     `json:"role" db:"role"`
+	LogTail      string     `json:"log_tail" db:"log_tail"` // end of the agent log, kept on the control plane
 }
 
 type ApprovalRequest struct {
@@ -228,10 +231,12 @@ type FinishRun struct {
 	Tokens     int64   `json:"tokens"`
 	CostUSD    float64 `json:"cost_usd"`
 	Summary    string  `json:"summary"`
+	LogTail    string  `json:"log_tail"`
 }
 
 type Decision struct {
-	Comment string `json:"comment"`
+	Comment     string `json:"comment"`
+	ConfirmCode string `json:"confirm_code,omitempty"` // required when Hermes relays the decision
 }
 
 type ID struct {
@@ -359,4 +364,16 @@ type ImpactedDoc struct {
 	DocumentInfo
 	Via   string `json:"via"`
 	Depth int    `json:"depth"`
+}
+
+// V2: remote workers.
+
+type CreateWorker struct {
+	Name     string   `json:"name"`
+	Projects []string `json:"projects,omitempty"` // slugs or ids the worker may serve; empty = any
+}
+
+type WorkerToken struct {
+	Worker Worker `json:"worker"`
+	Token  string `json:"token"` // shown once
 }

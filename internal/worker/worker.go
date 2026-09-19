@@ -412,8 +412,9 @@ func (w *Worker) runAgent(ctx context.Context, cl api.Claim, job Job, role strin
 	res, runErr := w.cfg.Agent.Run(ctx, job)
 	f.Close()
 
+	logData, _ := os.ReadFile(logPath)
 	finish := api.FinishRun{ExitStatus: res.ExitStatus, LogPath: logPath, Tokens: res.Tokens, CostUSD: res.CostUSD,
-		Summary: truncate(res.Summary, 10000)}
+		Summary: truncate(res.Summary, 10000), LogTail: strings.ToValidUTF8(tail(string(logData), 8000), "")}
 	if err := w.c.Do(context.WithoutCancel(ctx), "POST", fmt.Sprintf("/runs/%d/finish", run.ID), finish, nil); err != nil {
 		log.Printf("task %d: record run finish: %v", t.ID, err)
 	}

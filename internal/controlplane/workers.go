@@ -3,6 +3,7 @@ package controlplane
 import (
 	"cmp"
 	"context"
+	"crypto/rand"
 	"errors"
 	"log"
 	"net/http"
@@ -21,6 +22,40 @@ func (s *Server) listWorkers(r *http.Request, a actor) (any, error) {
 	return collect[api.Worker](r.Context(), s.db, `SELECT * FROM workers ORDER BY id`)
 }
 
+// createWorker gives a (remote) worker its own token, optionally limited to some projects (M2.4).
+// Calling it again for the same name rotates the token.
+func (s *Server) createWorker(r *http.Request, a actor) (any, error) {
+	var in api.CreateWorker
+	if err := decode(r, &in); err != nil {
+		return nil, err
+	}
+	if in.Name == "" {
+		return nil, errf(http.StatusBadRequest, "name is required")
+	}
+	out := api.WorkerToken{Token: rand.Text()}
+	err := s.tx(r.Context(), func(tx pgx.Tx) error {
+		ctx := r.Context()
+		ids := []int64{}
+		for _, ref := range in.Projects {
+			p, err := projectByRef(ctx, tx, ref)
+			if err != nil {
+				return errf(http.StatusBadRequest, "unknown project %q", ref)
+			}
+			ids = append(ids, p.ID)
+		}
+		var err error
+		out.Worker, err = one[api.Worker](ctx, tx, `
+			INSERT INTO workers (name, token_hash, project_ids, status) VALUES ($1, $2, $3, 'offline')
+			ON CONFLICT (name) DO UPDATE SET token_hash = EXCLUDED.token_hash, project_ids = EXCLUDED.project_ids
+			RETURNING *`, in.Name, hashToken(out.Token), ids)
+		if err != nil {
+			return err
+		}
+		return audit(ctx, tx, a, "worker.token", workerRef(out.Worker.ID), M{"name": in.Name, "project_ids": ids})
+	})
+	return out, err
+}
+
 func (s *Server) registerWorker(r *http.Request, a actor) (any, error) {
 	var in api.RegisterWorker
 	if err := decode(r, &in); err != nil {
@@ -29,17 +64,25 @@ func (s *Server) registerWorker(r *http.Request, a actor) (any, error) {
 	if in.Name == "" {
 		return nil, errf(http.StatusBadRequest, "name is required")
 	}
+	if a.workerName != "" && in.Name != a.workerName {
+		return nil, errf(http.StatusForbidden, "this token belongs to worker %q", a.workerName)
+	}
 	if in.Capabilities == nil {
 		in.Capabilities = []string{}
 	}
 	var w api.Worker
 	err := s.tx(r.Context(), func(tx pgx.Tx) error {
 		var err error
+		// A worker with its own token can only be taken over with that token.
 		w, err = one[api.Worker](r.Context(), tx, `
 			INSERT INTO workers (name, capabilities) VALUES ($1, $2)
 			ON CONFLICT (name) DO UPDATE
 			SET capabilities = EXCLUDED.capabilities, status = 'online', last_heartbeat_at = now()
-			RETURNING *`, in.Name, in.Capabilities)
+			WHERE workers.token_hash IS NULL OR workers.id = $3
+			RETURNING *`, in.Name, in.Capabilities, a.workerID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return errf(http.StatusForbidden, "worker %q has its own token", in.Name)
+		}
 		if err != nil {
 			return err
 		}
@@ -106,6 +149,7 @@ func (s *Server) claim(r *http.Request, a actor) (any, error) {
 			WHERE w.id = $1 AND w.status = 'online'
 			  AND t.status = 'PENDING'
 			  AND t.required_capabilities <@ w.capabilities
+			  AND (cardinality(w.project_ids) = 0 OR t.project_id = ANY (w.project_ids))
 			  AND NOT EXISTS (
 			      SELECT 1 FROM task_dependencies d JOIN tasks dt ON dt.id = d.depends_on_task_id
 			      WHERE d.task_id = t.id AND dt.status <> 'COMPLETED')
@@ -387,9 +431,9 @@ func (s *Server) finishRun(r *http.Request, a actor) (any, error) {
 	return nil, s.tx(r.Context(), func(tx pgx.Tx) error {
 		var taskID int64
 		err := tx.QueryRow(r.Context(), `
-			UPDATE agent_runs SET finished_at = now(), exit_status = $3, log_path = $4, tokens = $5, cost_usd = $6, summary = $7
+			UPDATE agent_runs SET finished_at = now(), exit_status = $3, log_path = $4, tokens = $5, cost_usd = $6, summary = $7, log_tail = $8
 			WHERE id = $1 AND worker_id = $2 AND finished_at IS NULL
-			RETURNING task_id`, id, a.workerID, in.ExitStatus, in.LogPath, in.Tokens, in.CostUSD, in.Summary).Scan(&taskID)
+			RETURNING task_id`, id, a.workerID, in.ExitStatus, in.LogPath, in.Tokens, in.CostUSD, in.Summary, in.LogTail).Scan(&taskID)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return errf(http.StatusConflict, "run %d is not an open run of %s", id, a)
 		}

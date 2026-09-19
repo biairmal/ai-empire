@@ -55,6 +55,7 @@ const usage = `usage: empire <command> [flags] [args]
   request-changes ID -m COMMENT
   reject ID [-m COMMENT]
   workers
+  worker add -name N [-project P]...   (own token for a remote worker; again to rotate)
   audit [-target task:ID]
 
 env: EMPIRE_CP_URL (default http://localhost:8787), EMPIRE_OWNER_TOKEN
@@ -83,7 +84,7 @@ func main() {
 
 func dispatch(ctx context.Context, c *client.Client, args []string) error {
 	cmd := args[0]
-	if slices.Contains([]string{"client", "project", "repo", "task", "request", "docs"}, cmd) && len(args) > 1 {
+	if slices.Contains([]string{"client", "project", "repo", "task", "request", "docs", "worker"}, cmd) && len(args) > 1 {
 		cmd, args = cmd+" "+args[1], args[1:]
 	}
 	fs := flag.NewFlagSet(cmd, flag.ExitOnError)
@@ -524,6 +525,19 @@ func dispatch(ctx context.Context, c *client.Client, args []string) error {
 			return err
 		}
 		fmt.Print(imp.Report)
+		return nil
+
+	case "worker add":
+		var in api.CreateWorker
+		fs.StringVar(&in.Name, "name", "", "")
+		fs.Var((*list)(&in.Projects), "project", "")
+		fs.Parse(args[1:])
+		var out api.WorkerToken
+		if err := post("/workers", in, &out); err != nil {
+			return err
+		}
+		fmt.Printf("worker %s (id %d). Put this in the worker's env; the token is shown once:\n\n  EMPIRE_WORKER_NAME=%s\n  EMPIRE_WORKER_TOKEN=%s\n",
+			out.Worker.Name, out.Worker.ID, out.Worker.Name, out.Token)
 		return nil
 
 	case "workers":

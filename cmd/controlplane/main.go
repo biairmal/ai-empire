@@ -35,17 +35,21 @@ func main() {
 	srv, err := controlplane.New(pool, controlplane.Config{
 		OwnerToken:   os.Getenv("EMPIRE_OWNER_TOKEN"),
 		WorkerToken:  os.Getenv("EMPIRE_WORKER_TOKEN"),
+		HermesToken:  os.Getenv("EMPIRE_HERMES_TOKEN"),
+		NotifyURL:    os.Getenv("EMPIRE_NTFY_URL"),
+		NotifyToken:  os.Getenv("EMPIRE_NTFY_TOKEN"),
 		KnowledgeDir: env("EMPIRE_KNOWLEDGE_DIR", "knowledge"),
 		WorkflowsDir: env("EMPIRE_WORKFLOWS_DIR", "workflows"),
 		StaleAfter:   stale,
 	})
 	if err != nil {
-		log.Fatalf("config: %v (set EMPIRE_OWNER_TOKEN and EMPIRE_WORKER_TOKEN, see .env.example)", err)
+		log.Fatalf("config: %v (see .env.example)", err)
 	}
 	if err := srv.Reindex(ctx); err != nil {
 		log.Printf("knowledge reindex: %v", err)
 	}
 	go srv.RunReaper(ctx)
+	go srv.RunNotifier(ctx)
 
 	hs := &http.Server{
 		Addr:              env("CP_ADDR", ":8787"),

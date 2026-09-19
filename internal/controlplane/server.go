@@ -4,7 +4,9 @@ package controlplane
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,7 +30,10 @@ import (
 
 type Config struct {
 	OwnerToken   string
-	WorkerToken  string
+	WorkerToken  string // shared by workers without their own token; empty = per-worker tokens only
+	HermesToken  string // the Hermes operator (V2); empty = disabled
+	NotifyURL    string // ntfy topic URL for notifications (V2); empty = disabled
+	NotifyToken  string // optional ntfy access token
 	KnowledgeDir string
 	WorkflowsDir string
 	StaleAfter   time.Duration // worker considered dead after this long without a heartbeat
@@ -45,8 +50,12 @@ type Server struct {
 }
 
 func New(db *pgxpool.Pool, cfg Config) (*Server, error) {
-	if cfg.OwnerToken == "" || cfg.WorkerToken == "" || cfg.OwnerToken == cfg.WorkerToken {
-		return nil, errors.New("owner and worker tokens must be set and different")
+	if cfg.OwnerToken == "" {
+		return nil, errors.New("owner token must be set")
+	}
+	if cfg.OwnerToken == cfg.WorkerToken || cfg.OwnerToken == cfg.HermesToken ||
+		(cfg.HermesToken != "" && cfg.HermesToken == cfg.WorkerToken) {
+		return nil, errors.New("owner, worker and hermes tokens must be different")
 	}
 	if cfg.StaleAfter <= 0 {
 		cfg.StaleAfter = time.Minute
@@ -66,15 +75,20 @@ func New(db *pgxpool.Pool, cfg Config) (*Server, error) {
 
 type M = map[string]any
 
-// actor is who is calling: the owner (human) or a worker.
+// actor is who is calling: the owner (human), Hermes (the AI operator) or a worker.
 type actor struct {
-	kind     string // "owner" | "worker" | "system"
-	workerID int64
+	kind       string // "owner" | "hermes" | "worker" | "system"
+	via        string // "hermes" when Hermes relays an owner decision (it had the confirm code)
+	workerID   int64
+	workerName string // set when the worker authenticated with its own token
 }
 
 func (a actor) String() string {
-	if a.kind == "worker" {
+	switch {
+	case a.kind == "worker":
 		return fmt.Sprintf("worker:%d", a.workerID)
+	case a.via != "":
+		return a.kind + " via " + a.via
 	}
 	return a.kind
 }
@@ -82,9 +96,9 @@ func (a actor) String() string {
 type role int
 
 const (
-	ownerOnly role = iota + 1
-	workerOnly
-	anyone
+	ownerOnly  role = iota + 1
+	operator        // owner or Hermes
+	workerOnly      // workers never read the API: least privilege for remote machines (spec §34)
 )
 
 type apiFunc func(r *http.Request, a actor) (any, error)
@@ -108,48 +122,49 @@ func (s *Server) Handler() http.Handler {
 
 	// {ref} = slug or numeric id
 	h("POST /clients", ownerOnly, s.createClient)
-	h("GET /clients", anyone, s.listClients)
-	h("GET /clients/{ref}", anyone, s.getClient)
+	h("GET /clients", operator, s.listClients)
+	h("GET /clients/{ref}", operator, s.getClient)
 
 	h("POST /projects", ownerOnly, s.createProject)
-	h("GET /projects", anyone, s.listProjects)
-	h("GET /projects/{ref}", anyone, s.getProject)
+	h("GET /projects", operator, s.listProjects)
+	h("GET /projects/{ref}", operator, s.getProject)
 	h("PATCH /projects/{ref}", ownerOnly, s.updateProject)
 	h("PATCH /projects/{ref}/repositories/{name}", ownerOnly, s.updateRepository)
 	h("POST /projects/{ref}/client", ownerOnly, s.moveProject)
 	h("POST /projects/{ref}/repositories", ownerOnly, s.createRepository)
-	h("GET /projects/{ref}/repositories", anyone, s.listProjectRepositories)
-	h("GET /repositories", anyone, s.listRepositories)
+	h("GET /projects/{ref}/repositories", operator, s.listProjectRepositories)
+	h("GET /repositories", operator, s.listRepositories)
 
-	h("POST /tasks", ownerOnly, s.createTask)
-	h("GET /tasks", anyone, s.listTasks)
-	h("GET /tasks/{id}", anyone, s.getTask)
-	h("POST /tasks/{id}/cancel", ownerOnly, s.cancelTask)
-	h("POST /tasks/{id}/retry", ownerOnly, s.retryTask)
+	h("POST /tasks", operator, s.createTask)
+	h("GET /tasks", operator, s.listTasks)
+	h("GET /tasks/{id}", operator, s.getTask)
+	h("POST /tasks/{id}/cancel", operator, s.cancelTask)
+	h("POST /tasks/{id}/retry", operator, s.retryTask)
 
-	h("GET /approvals", anyone, s.listApprovals)
-	h("GET /approvals/{id}", anyone, s.getApproval)
-	h("POST /approvals/{id}/{decision}", ownerOnly, s.decide)
+	h("GET /approvals", operator, s.listApprovals)
+	h("GET /approvals/{id}", operator, s.getApproval)
+	h("POST /approvals/{id}/{decision}", operator, s.decide)
 
-	h("GET /audit", ownerOnly, s.listAudit)
-	h("GET /workers", anyone, s.listWorkers)
+	h("GET /audit", operator, s.listAudit)
+	h("GET /workers", operator, s.listWorkers)
+	h("POST /workers", ownerOnly, s.createWorker)
 
 	// V3: workflows (spec §7)
-	h("GET /workflows", anyone, s.listWorkflows)
-	h("POST /requests", ownerOnly, s.createRequest)
-	h("GET /requests", anyone, s.listRequests)
-	h("GET /requests/{id}", anyone, s.getRequest)
-	h("POST /requests/{id}/cancel", ownerOnly, s.cancelRequest)
+	h("GET /workflows", operator, s.listWorkflows)
+	h("POST /requests", operator, s.createRequest)
+	h("GET /requests", operator, s.listRequests)
+	h("GET /requests/{id}", operator, s.getRequest)
+	h("POST /requests/{id}/cancel", operator, s.cancelRequest)
 
 	// V3: documents and the knowledge graph (spec §13–§19, §37, §38)
-	h("GET /documents", anyone, s.listDocuments)
+	h("GET /documents", operator, s.listDocuments)
 	h("POST /documents", ownerOnly, s.newDocument)
-	h("POST /documents/validate", anyone, s.validateDocuments)
+	h("POST /documents/validate", operator, s.validateDocuments)
 	h("POST /documents/submit", ownerOnly, s.submitDocument)
 	h("POST /documents/reindex", ownerOnly, s.reindexDocuments)
 	h("GET /documents/export", ownerOnly, s.exportDocuments)
-	h("GET /trace", anyone, s.trace)
-	h("GET /impact", anyone, s.impact)
+	h("GET /trace", operator, s.trace)
+	h("GET /impact", operator, s.impact)
 
 	// Worker protocol
 	h("POST /workers/register", workerOnly, s.registerWorker)
@@ -190,18 +205,50 @@ func (s *Server) wrap(rl role, fn apiFunc) http.Handler {
 
 func (s *Server) authenticate(r *http.Request, rl role) (actor, error) {
 	tok, _ := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-	eq := func(want string) bool { return subtle.ConstantTimeCompare([]byte(tok), []byte(want)) == 1 }
+	eq := func(want string) bool {
+		return want != "" && subtle.ConstantTimeCompare([]byte(tok), []byte(want)) == 1
+	}
+	var a actor
 	switch {
-	case eq(s.cfg.OwnerToken) && rl != workerOnly:
-		return actor{kind: "owner"}, nil
-	case eq(s.cfg.WorkerToken) && rl != ownerOnly:
-		// ponytail: shared worker token, worker identity is self-declared; per-worker tokens in M2.4.
-		id, _ := strconv.ParseInt(r.Header.Get("X-Worker-ID"), 10, 64)
-		return actor{kind: "worker", workerID: id}, nil
-	case eq(s.cfg.OwnerToken) || eq(s.cfg.WorkerToken):
+	case eq(s.cfg.OwnerToken):
+		a.kind = "owner"
+	case eq(s.cfg.HermesToken):
+		a.kind = "hermes"
+	case eq(s.cfg.WorkerToken):
+		// The shared token's worker identity is self-declared, so it may not act as a worker with its own token.
+		a.kind = "worker"
+		a.workerID, _ = strconv.ParseInt(r.Header.Get("X-Worker-ID"), 10, 64)
+		var own bool
+		err := s.db.QueryRow(r.Context(), `SELECT token_hash IS NOT NULL FROM workers WHERE id = $1`, a.workerID).Scan(&own)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return a, err
+		}
+		if own {
+			return a, errf(http.StatusForbidden, "worker %d has its own token", a.workerID)
+		}
+	case tok != "":
+		err := s.db.QueryRow(r.Context(), `SELECT id, name FROM workers WHERE token_hash = $1`, hashToken(tok)).
+			Scan(&a.workerID, &a.workerName)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return a, errf(http.StatusUnauthorized, "unauthorized")
+		}
+		if err != nil {
+			return a, err
+		}
+		a.kind = "worker"
+	default:
+		return a, errf(http.StatusUnauthorized, "unauthorized")
+	}
+	allowed := map[role]bool{ownerOnly: a.kind == "owner", operator: a.kind != "worker", workerOnly: a.kind == "worker"}
+	if !allowed[rl] {
 		return actor{}, errf(http.StatusForbidden, "forbidden for this role")
 	}
-	return actor{}, errf(http.StatusUnauthorized, "unauthorized")
+	return a, nil
+}
+
+func hashToken(tok string) string {
+	sum := sha256.Sum256([]byte(tok))
+	return hex.EncodeToString(sum[:])
 }
 
 func toHTTP(err error) (int, string) {
@@ -254,13 +301,19 @@ func audit(ctx context.Context, tx pgx.Tx, a actor, action, target string, paylo
 	if payload == nil {
 		payload = M{}
 	}
-	id := a.kind
-	if a.kind == "worker" {
+	typ, id := a.kind, a.kind
+	switch {
+	case a.kind == "worker":
 		id = strconv.FormatInt(a.workerID, 10)
+	case a.via != "":
+		typ, id = a.via, a.String()
 	}
-	_, err := tx.Exec(ctx,
-		`INSERT INTO audit_log (actor_type, actor_id, action, target, payload) VALUES ($1, $2, $3, $4, $5)`,
-		a.kind, id, action, target, payload)
+	q := `INSERT INTO audit_log (actor_type, actor_id, action, target, payload) VALUES ($1, $2, $3, $4, $5)`
+	if notifies(action, payload) {
+		// Queue the notification in the event's own transaction (outbox, spec §39).
+		q = `WITH a AS (` + q + ` RETURNING id) INSERT INTO notifications (audit_id) SELECT id FROM a`
+	}
+	_, err := tx.Exec(ctx, q, typ, id, action, target, payload)
 	return err
 }
 

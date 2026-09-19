@@ -70,8 +70,10 @@ func CanDecide(requestedBy, decidedBy string) bool {
 	return IsHuman(decidedBy) && (decidedBy != requestedBy || IsHuman(requestedBy))
 }
 
-// IsHuman reports whether an actor string ("owner", "worker:3") is a human.
-func IsHuman(actor string) bool { return actor == "owner" || strings.HasPrefix(actor, "owner:") }
+// IsHuman reports whether an actor string ("owner", "owner via hermes", "worker:3") is a human.
+func IsHuman(actor string) bool {
+	return actor == "owner" || strings.HasPrefix(actor, "owner:") || strings.HasPrefix(actor, "owner via ")
+}
 
 func set(xs ...string) map[string]bool {
 	m := make(map[string]bool, len(xs))

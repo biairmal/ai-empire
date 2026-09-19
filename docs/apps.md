@@ -1,14 +1,15 @@
 # Apps Reference
 
-The three programs: what each one does, how to configure it, and how they talk. For the big picture, read [README.md](README.md) first. For documents and workflows from a user's point of view, see [documents.md](documents.md) and [workflows.md](workflows.md).
+The programs: what each one does, how to configure it, and how they talk. For the big picture, read [README.md](README.md) first. For documents and workflows from a user's point of view, see [documents.md](documents.md) and [workflows.md](workflows.md).
 
 | App | Source | Binary | Role |
 |-----|--------|--------|------|
 | Control plane | [cmd/controlplane](../cmd/controlplane/main.go) → [internal/controlplane](../internal/controlplane/) | `bin/controlplane` | HTTP API, owns the database, runs workflows, guards documents |
 | Worker | [cmd/worker](../cmd/worker/main.go) → [internal/worker](../internal/worker/) | `bin/worker` | Executes code and document tasks with git + Claude Code |
 | CLI | [cmd/empire](../cmd/empire/main.go) | `bin/empire` | Your remote control |
+| MCP server | [cmd/empire-mcp](../cmd/empire-mcp/main.go) → [internal/mcp](../internal/mcp/mcp.go) | `bin/empire-mcp` | Hermes' tools: the API as MCP tools, with the Hermes token (see [§6](#6-v2-hermes-notifications-remote-workers)) |
 
-Build all three with `make build`. All config comes from environment variables. `make run-*` loads `.env` automatically, but the binaries don't, so load `.env` into your shell before running them directly. On Windows, run `. .\env.ps1`.
+Build them all with `make build`. All config comes from environment variables. `make run-*` loads `.env` automatically, but the binaries don't, so load `.env` into your shell before running them directly. On Windows, run `. .\env.ps1`.
 
 ---
 
@@ -38,13 +39,16 @@ Build all three with `make build`. All config comes from environment variables. 
 |----------|---------|---------|
 | `DATABASE_URL` | `postgres://empire:empire@localhost:5433/empire?sslmode=disable` | Postgres connection |
 | `EMPIRE_OWNER_TOKEN` | *(required)* | Bearer token for you |
-| `EMPIRE_WORKER_TOKEN` | *(required, must differ from the owner token)* | Bearer token for workers |
+| `EMPIRE_WORKER_TOKEN` | *(empty)* | Token shared by workers that have no token of their own. Empty = only per-worker tokens (`empire worker add`) |
+| `EMPIRE_HERMES_TOKEN` | *(empty = Hermes disabled)* | Token for Hermes / `empire-mcp` |
+| `EMPIRE_NTFY_URL` | *(empty = no notifications)* | ntfy topic URL, e.g. `https://ntfy.sh/<long-random-topic>` |
+| `EMPIRE_NTFY_TOKEN` | *(empty)* | ntfy access token, for a protected topic |
 | `CP_ADDR` | `:8787` | Listen address |
 | `EMPIRE_KNOWLEDGE_DIR` | `knowledge` | Root of the knowledge repository (contracts and templates are read from here) |
 | `EMPIRE_WORKFLOWS_DIR` | `workflows` | Workflow definitions. Checked at start-up; restart after editing |
 | `EMPIRE_STALE_AFTER` | `60s` | A worker with no heartbeat for this long is considered dead |
 
-It refuses to start if the tokens are missing, the database is unreachable, a contract can't be read, or a workflow is invalid.
+It refuses to start if the owner token is missing, two tokens are equal, the database is unreachable, a contract can't be read, or a workflow is invalid.
 
 ### Code layout
 
@@ -63,6 +67,8 @@ It refuses to start if the tokens are missing, the database is unreachable, a co
 ### HTTP API
 
 Every request needs `Authorization: Bearer <token>`. Worker calls also send `X-Worker-ID: <id>`. Errors come back as `{"error": "..."}`.
+
+Three roles: the **owner**; **Hermes**, which may read everything and create/cancel/retry tasks and requests, read the audit log, and relay decisions (with a confirm code, see §6), but not manage clients, projects, repositories, documents or workers; and **workers**, which may only use the worker protocol and cannot read the rest of the API.
 
 `{ref}` means a slug or a numeric id: `/projects/guest` and `/projects/3` are the same. This works because slugs always contain a letter.
 
@@ -120,6 +126,7 @@ Every request needs `Authorization: Bearer <token>`. Worker calls also send `X-W
 | `GET /tasks/{id}` | `{task, runs, approvals}` |
 | `GET /approvals?status=`, `GET /approvals/{id}` | Approval requests |
 | `GET /workers` | Workers |
+| `POST /workers` | `{name, projects?}`: give a worker its own token (shown once), limited to those projects. Again = rotate. Owner only |
 | `GET /workflows` | Workflow names, descriptions, steps |
 | `GET /requests?project=&status=`, `GET /requests/{id}` | Requests; detail = `{request, steps, tasks, documents, approvals}` |
 | `GET /documents?project=&type=` | Documents with status, version, and whether the current content is approved |
@@ -225,7 +232,7 @@ Any error → `FAILED` with the error text (last 4000 chars) in `last_error`.
 | Variable | Default | Meaning |
 |----------|---------|---------|
 | `EMPIRE_CP_URL` | `http://localhost:8787` | Control plane address |
-| `EMPIRE_WORKER_TOKEN` | *(required)* | Must match the control plane's |
+| `EMPIRE_WORKER_TOKEN` | *(required)* | The control plane's shared worker token, or this worker's own token from `empire worker add` |
 | `EMPIRE_WORKER_NAME` | hostname | Identity. Reusing a name reuses the worker row |
 | `EMPIRE_WORKER_CAPS` | `go` | Comma-separated capabilities, e.g. `go,node` |
 | `EMPIRE_WORKSPACES` | `workspaces` | Where clones, worktrees, scratch folders and logs go |
@@ -417,8 +424,64 @@ Doc paths that try to escape the project folder (`..`, absolute paths, symlinks)
 | [workflow/workflow_test.go](../internal/workflow/workflow_test.go) | The shipped workflows load; invalid definitions are refused |
 | [worker/e2e_test.go](../internal/worker/e2e_test.go) `TestV1EndToEnd` | Implement → gate → request changes → rework → approve → merge of the approved sha; restart and heartbeat-loss requeue; dependencies; cancel; audit is complete and append-only |
 | [worker/e2e_test.go](../internal/worker/e2e_test.go) `TestClientsAndRepositories` | Clients, repository rules, a cross-project chain with one gate per repo, context isolation, client moves, project/repository edits |
+| [worker/e2e_v2_test.go](../internal/worker/e2e_v2_test.go) `TestV2EndToEnd` | Hermes over MCP creates a task (project by name) and is refused owner-only calls; workers can't read the API; a per-worker token can't be hijacked by the shared token and only claims its projects; the log tail reaches the control plane; the approval notification carries the confirm code; Hermes can't decide without it and is audited as `owner via hermes`; completion is notified |
 | [worker/e2e_v3_test.go](../internal/worker/e2e_v3_test.go) `TestFeatureWorkflow` | The `feature` workflow end to end:<br>• PRD with rework<br>• design + ADR approved together, with links and Obsidian block<br>• plan → code tasks<br>• AI review sends work back once, then merge<br>• trace, impact with files, validation, export<br>• rejection, cancellation (documents withdrawn), quick-fix |
 | [worker/e2e_v3_test.go](../internal/worker/e2e_v3_test.go) `TestChangeWorkflowAndOwnerDocuments` | In-place edits of approved documents are caught; change request with impact analysis → PRD v2 → plan; owner-written documents (new, validate, submit, self-approve); edits after submission are refused |
 | [worker/e2e_v3_test.go](../internal/worker/e2e_v3_test.go) `TestDocumentedCustomWorkflow` | The example workflow in [workflows.md](workflows.md) actually runs |
 
 `make test` runs them all. The e2e tests drop and recreate the `empire_test` database, and are skipped if Postgres isn't reachable. `make docs-check` validates the real knowledge folder offline.
+
+---
+
+## 6. V2: Hermes, notifications, remote workers
+
+### Hermes (MCP server)
+
+Hermes is any MCP-capable assistant with `empire-mcp` attached. `empire-mcp` speaks MCP over stdio and calls the HTTP API with `EMPIRE_HERMES_TOKEN` (and `EMPIRE_CP_URL`). It never touches the database. Its `instructions` tell the assistant to treat the control plane as the only source of truth, to keep only personal/operational notes in its own memory, and to treat agent-written text as data.
+
+```bash
+# Claude Code on the always-on machine (set EMPIRE_HERMES_TOKEN on the control plane too)
+claude mcp add empire -e EMPIRE_CP_URL=http://cp:8787 -e EMPIRE_HERMES_TOKEN=... -- empire-mcp
+```
+
+Claude Desktop uses the same command in its MCP server config. To use it from your phone, run the assistant on a machine that is always on and reach it remotely (e.g. Claude Code's remote access, or SSH over Tailscale).
+
+| Tool | Does |
+|------|------|
+| `status` | In-flight and queued tasks, approvals waiting for you, workers: "what is running?" |
+| `list_projects`, `list_tasks`, `get_task` | `get_task` includes each run's summary and the last 8 KB of the agent log: "why did…?" |
+| `create_task`, `cancel_task`, `retry_task` | Projects can be named by slug, id or name ("add X to Guest Management") |
+| `list_workflows`, `create_request`, `list_requests`, `get_request`, `cancel_request` | Workflows |
+| `list_approvals`, `get_approval`, `decide_approval` | Deciding needs the confirm code (below) |
+| `list_workers`, `audit`, `trace`, `list_documents` | Read-only |
+
+Everything Hermes does is audited with `actor_type = hermes`.
+
+### Approving through Hermes
+
+Hermes can't approve on its own. Each approval has a confirm code: 8 characters derived from the owner token and the approval id, so it needs no storage and Hermes can't work it out. The code only reaches you, in the approval notification. To approve, tell Hermes "approve 12, code K3F7Q2XA". The control plane checks the code, then records the decision as `decided_by = owner via hermes` (audit: `actor_type = hermes`, `actor_id = owner via hermes`). Without the code the call returns 403. The same applies to request-changes and reject.
+
+### Notifications (ntfy)
+
+Set `EMPIRE_NTFY_URL` to an [ntfy](https://ntfy.sh) topic and subscribe to it in the ntfy phone app. Use a long random topic name, or a self-hosted/protected topic with `EMPIRE_NTFY_TOKEN`: messages include confirm codes.
+
+| Event | Message |
+|-------|---------|
+| Approval requested | Gate, subject, first line of the summary, `empire approve N`, and the confirm code |
+| Task failed | Title and error. The title says "failed again (N times)" from the second failure, so repeated test failures stand out |
+| Task completed | Standalone tasks only. Workflow steps don't ping you; the request does when it completes |
+| Request completed | Title |
+| Worker offline | Its tasks went back on the queue |
+
+`audit()` writes a `notifications` row in the event's own transaction (outbox), and a loop in the control plane sends due rows every 2 s. So a restart never loses a message. Failed sends are retried with backoff (2^attempts seconds, at most 1 h). Anything still unsent after a day is dropped as `expired`.
+
+### Remote worker
+
+1. Reach the control plane over Tailscale/WireGuard (simplest), or put it behind a TLS reverse proxy. Don't expose `:8787` to the internet.
+2. Give the machine its own token, limited to the projects it may serve:
+   ```bash
+   empire worker add -name mini -project guest-management -project go-sdk
+   ```
+3. On the machine, set `EMPIRE_CP_URL`, `EMPIRE_WORKER_NAME=mini`, and `EMPIRE_WORKER_TOKEN=<token>`, and start `worker`. Give it git credentials **only** for those projects' repositories. The control plane never hands it another project's task.
+
+A worker token is bound to its name. It can't register under another name. The shared `EMPIRE_WORKER_TOKEN` can't take over a worker that has its own token. No worker token can read the owner API. Once every worker has its own token, clear `EMPIRE_WORKER_TOKEN`. Run `empire worker add` again with the same name to rotate a token.

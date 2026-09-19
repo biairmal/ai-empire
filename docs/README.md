@@ -236,6 +236,8 @@ This is what happened in the real V1 demo run, step by step, with the database r
 | Run shell / git commands | n/a | ✅ | ❌ (`acceptEdits` mode; the reviewer is read-only) |
 | Call the control plane | ✅ | ✅ | ❌ (tokens are stripped from its env) |
 
+Hermes (the AI operator, `EMPIRE_HERMES_TOKEN`) can read everything, create/cancel/retry tasks and requests, and read the audit log. It can decide a gate only by relaying your decision with the confirm code from your notification. It can't manage clients, projects, repositories, documents or workers. See [apps.md §6](apps.md#6-v2-hermes-notifications-remote-workers).
+
 Risk levels (from [internal/policy/policy.go](../internal/policy/policy.go)):
 
 | Risk | Actions | Needs a human? |
@@ -367,7 +369,7 @@ AI Empire/
 
 ## 8. Known limitations
 
-- All workers share one token, and a worker's identity (`X-Worker-ID`) is self-declared.
+- Workers on the shared token declare their own identity (`X-Worker-ID`). Give remote workers their own token (`empire worker add`).
 - A worker runs one task at a time, and there's no per-project lock for running tasks in parallel on one machine.
 - Cancelling a task closes its open gates as `REJECTED` without writing an `approval_decisions` row.
 - Clients, projects and repositories can be created and edited (projects can be moved), but slugs/names cannot be renamed and nothing can be deleted yet.
@@ -375,4 +377,5 @@ AI Empire/
 - Knowledge files edited by hand are re-indexed at control-plane start, by `empire docs reindex`, or by the post-commit hook, not instantly.
 - Approved document versions are identified by a content fingerprint, not a git commit; commit `knowledge/` yourself to keep the history.
 - Deployment is not automated: the Deployment Plan is a document, and `deploy_production` exists only as a policy action.
-- No Tester, Documentation, or DevOps agent roles yet; no web UI, notifications, or Hermes (V2, deferred).
+- No Tester, Documentation, or DevOps agent roles yet, and no web UI (M4.1).
+- Hermes runs over MCP stdio only (no remote HTTP transport), and only ntfy is supported for notifications. Agent logs are not scrubbed for secrets before their tail is stored.

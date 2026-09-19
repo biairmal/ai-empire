@@ -8,6 +8,7 @@ PostgreSQL 17 is the **single source of truth** for platform state (spec §31). 
   - `000004_agent_run_summary`: `agent_runs.summary`
   - `000005_workflows_documents`: requests, task kinds, document approvals, knowledge graph index
   - `000006_task_changed_files`: `tasks.changed_files`
+  - `000007_v2_interface`: per-worker tokens and project limits, `agent_runs.log_tail`, the `notifications` outbox
 - Connection (dev): `postgres://empire:empire@localhost:5433/empire`
 - Open a SQL shell: `docker compose exec postgres psql -U empire -d empire`
 
@@ -116,7 +117,7 @@ Terminal states: `COMPLETED` and `CANCELLED`. `FAILED` isn't terminal; retry mov
 
 ## 3. Tables
 
-Legend for "Written by": **O** = owner via CLI/API, **W** = worker via API, **S** = system (the reaper inside the control plane).
+Legend for "Written by": **O** = owner via CLI/API (some actions also by Hermes, audited as `hermes`), **W** = worker via API, **S** = system (the reaper and the notifier inside the control plane).
 
 **Slug rule** (clients and projects): lowercase `a-z0-9-`, starting with a letter or digit, and **containing at least one letter**. That lets every API path take either the slug or the numeric id (`/projects/guest` or `/projects/3`).
 
@@ -237,14 +238,16 @@ Execution processes.
 
 | Column | Type | Notes |
 |--------|------|-------|
-| `id` | bigint PK | Sent by the worker as `X-Worker-ID` |
+| `id` | bigint PK | Sent by the worker as `X-Worker-ID` (ignored for workers that have their own token) |
 | `name` | text UNIQUE | `EMPIRE_WORKER_NAME` (default: hostname). Re-registering with the same name reuses the row |
 | `capabilities` | text[] | `EMPIRE_WORKER_CAPS`, e.g. `{go,node}` |
 | `status` | text | `online` / `offline` |
 | `last_heartbeat_at` | timestamptz | Updated every 10s |
+| `token_hash` | text UNIQUE, nullable | sha256 of the worker's own token (`empire worker add`). `NULL` = uses the shared token |
+| `project_ids` | bigint[] | Projects it may claim tasks from. Empty = any |
 | `created_at` | timestamptz | |
 
-Written by: **W** (register, heartbeat) and **S** (the reaper sets `offline` after `EMPIRE_STALE_AFTER`).
+Written by: **O** (`POST /workers`: token and projects), **W** (register, heartbeat) and **S** (the reaper sets `offline` after `EMPIRE_STALE_AFTER`).
 
 ### `agent_runs`
 
@@ -265,6 +268,7 @@ One execution of an agent (developer, reviewer, product manager, architect, plan
 | `cost_usd` | numeric(12,6) | As reported by Claude |
 | `summary` | text | The agent's own account of what it did (Claude's final message, up to 10 000 bytes). Also shown in the merge approval request |
 | `role` | text | Which role ran: a code task has `developer` runs and, with AI review, `reviewer` runs |
+| `log_tail` | text | Last 8 KB of the agent log, so it can be read without access to the worker's disk |
 
 Written by: **W** (`POST /tasks/{id}/runs`, then `POST /runs/{id}/finish`).
 
@@ -357,6 +361,22 @@ requests 1 ── * tasks ── output_docs ──► documents ◄── doc_e
                   │                          ▲
                   └── merge_sha, changed_files     document_approvals (approved versions)
 ```
+
+### `notifications`
+
+Outbox for owner notifications (V2). `audit()` adds a row in the same transaction as the audit entry it announces. The control plane sends due rows to ntfy.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | bigint PK | |
+| `audit_id` | FK → audit_log | The event: `approval.request`, `task.status` to FAILED/COMPLETED, `worker.offline`, `request.completed` |
+| `attempts` | int | Failed sends |
+| `last_error` | text | Last send error, or `expired` |
+| `next_attempt_at` | timestamptz | Backoff: now + 2^attempts s, at most 1 h |
+| `sent_at` | timestamptz, nullable | `NULL` = still to send. Rows older than a day are expired |
+| `created_at` | timestamptz | |
+
+Written by: **S**.
 
 ### `audit_log`
 

@@ -1,8 +1,14 @@
 package controlplane
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/base32"
+	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"aiempire/internal/api"
 	"aiempire/internal/policy"
@@ -23,6 +29,14 @@ func (s *Server) getApproval(r *http.Request, a actor) (any, error) {
 		return nil, err
 	}
 	return one[api.ApprovalRequest](r.Context(), s.db, `SELECT * FROM approval_requests WHERE id = $1`, id)
+}
+
+// confirmCode is the code the owner gives Hermes to decide approval id.
+// Derived from the owner token, so it needs no storage and Hermes cannot compute it.
+func (s *Server) confirmCode(id int64) string {
+	m := hmac.New(sha256.New, []byte(s.cfg.OwnerToken))
+	fmt.Fprintf(m, "approval:%d", id)
+	return base32.StdEncoding.EncodeToString(m.Sum(nil)[:5]) // 8 characters, 40 bits
 }
 
 var decisions = map[string]string{
@@ -47,6 +61,14 @@ func (s *Server) decide(r *http.Request, a actor) (any, error) {
 	}
 	if status == "CHANGES_REQUESTED" && in.Comment == "" {
 		return nil, errf(http.StatusBadRequest, "request-changes needs a comment")
+	}
+	// Hermes never decides on its own: it relays the owner's decision, proven by the
+	// confirm code that only reaches the owner (in the approval notification).
+	if a.kind == "hermes" {
+		if subtle.ConstantTimeCompare([]byte(strings.ToUpper(strings.TrimSpace(in.ConfirmCode))), []byte(s.confirmCode(id))) != 1 {
+			return nil, errf(http.StatusForbidden, "hermes needs the owner's confirm code for approval %d", id)
+		}
+		a = actor{kind: "owner", via: "hermes"}
 	}
 
 	// Document decisions rewrite knowledge files; keep them in step with the database.

@@ -38,6 +38,7 @@ func TestCanDecide(t *testing.T) {
 		{"worker:1", "worker:2", false}, // AI approving AI
 		{"owner", "owner", true},        // the owner may approve their own document
 		{"worker:1", "hermes", false},
+		{"worker:1", "owner via hermes", true}, // Hermes relaying the owner (it had the confirm code)
 	}
 	for _, tt := range tests {
 		if got := CanDecide(tt.requestedBy, tt.decidedBy); got != tt.want {

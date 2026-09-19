@@ -106,7 +106,7 @@ scripts/hooks/           git hooks (`make hooks`)
 
 ## API
 
-Auth: `Authorization: Bearer <token>`. Worker calls also send `X-Worker-ID`.
+Auth: `Authorization: Bearer <token>`. Worker calls also send `X-Worker-ID`. Hermes (`EMPIRE_HERMES_TOKEN`, via `empire-mcp`) may call the owner reads plus tasks, requests, audit, and decisions (with a confirm code). Workers can only call the worker column. `POST /workers` (owner) issues a per-worker token.
 
 | Owner | Worker |
 |-------|--------|
