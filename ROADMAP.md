@@ -287,16 +287,77 @@ User guide: [docs/documents.md](docs/documents.md). Reference: [docs/workflows.m
 
 Do these in order of real pain, not in list order.
 
-- [ ] **Multiple workers:** concurrency limits per worker/project; re-evaluate Redis here
+- [ ] **Multiple workers, multiple models + routing, observability:** see **M4.1** below. Re-evaluate Redis once many agent slots poll Postgres
 - [ ] **Docker-per-task sandboxes:** filesystem and network boundaries, secrets injected per task (§34)
-- [ ] **Multiple models + routing (§32):** add a second `Agent` implementation; route by a simple rule table (task type → model)
 - [ ] **Cost tracking & budgets:** per-client and per-project token/cost totals, and budget caps that pause work
 - [ ] **Advanced scheduling:** priorities, dependency-aware ordering, fair share across projects
 - [ ] **Learning system (§23):** `learning_candidates` table → human review → promote to `stacks/` or `global/` (always gated)
-- [ ] **Observability (§36):** a small web dashboard, or Grafana over Postgres; failures, retries, durations, costs
 - [ ] **Automated knowledge indexing:** reindex on push via webhook
 - [ ] **Advanced policy engine:** only if the YAML map from M1.3 becomes unmanageable
 - [ ] *(defer)* vector search. Only if graph + folder scoping demonstrably fails to find context
+
+### M4.1 Web console & agent slots (§4, §27, §28, §32, §36)
+Manage agent slots, requests, approvals and documents from a browser. One machine (e.g. a VPS) runs many tasks at once.
+
+**Terms (§27)**
+- **Machine**: a host running one worker service. It declares its skills (toolchains: `go`, `node`, `docker`) and a slot limit.
+- **Agent slot**: an owner-managed profile (name, roles, projects, provider + model, complexity it handles). It holds at most one task at a time. More slots on a machine = more tasks in parallel.
+- **Coding agent**: the AI process a slot runs for a task (Claude Code, …), as today.
+
+**Rule: profiles are policy, not dispatch (§4).** A profile limits what a slot *may* claim; the scheduler still decides who gets what. There is no "assign task X to slot Y". An empty list means no restriction, so a slot with a blank profile takes anything.
+
+**Stepping stone (works today, no code)**
+- [ ] Run several worker processes on one machine, one per slot, each with its own `EMPIRE_WORKER_NAME` and `EMPIRE_WORKSPACES` (systemd template `empire-worker@.service`). Document it in [docs/apps.md](docs/apps.md)
+
+**Data model**
+- [ ] `machines` (id, name UNIQUE, capabilities, max_slots, status, last_heartbeat_at). Replaces `workers` as the registering unit; capabilities stay machine-declared
+- [ ] `agent_slots` (id, name UNIQUE, machine_id FK, enabled, roles text[], project_ids bigint[], provider, model, handles text[], created_at). Owner-managed; re-registering a machine never changes its slots
+- [ ] `tasks.slot_id` (the claimer while in flight) and `tasks.last_slot_id` (kept afterwards, so "who did it" survives approval and completion)
+- [ ] `tasks.complexity` (`low` | `high`, default `low`) and an optional `tasks.model` override
+- [ ] `agent_runs.slot_id`; `agent_runs.model` records the provider + model that actually ran
+- [ ] Provider policy (§11B, §32): `clients.allowed_providers` and `projects.allowed_providers` (a project's list narrows its client's). Client work defaults to trusted providers only
+- [ ] Migrate existing `workers` rows: one machine + one slot each
+
+**Scheduling**
+- [ ] A slot claims a task only when: `required_capabilities ⊆ machine.capabilities`, role ∈ slot.roles, project ∈ slot.project_ids, complexity ∈ slot.handles, and slot.provider is allowed for the task's project. Test: a slot never claims outside its profile, and a slot on a disallowed provider never claims a client's task
+- [ ] The planner's work breakdown sets `complexity` per work item (add the field to the implementation-plan contract); the owner can override it on any task that is not running
+- [ ] Model resolution: task override → slot model → machine default. Read when a run starts. A task override must still use an allowed provider
+- [ ] Unclaimable tasks: a PENDING task that no enabled slot can claim is flagged ("no slot can claim this: provider not allowed for client acme") in the API and the console
+- [ ] Heartbeat per machine lists the tasks each slot holds; a stale machine requeues all its slots' tasks
+
+**Worker service (one process per machine)**
+- [ ] Register the machine, fetch its enabled slots (`GET /machines/{id}/slots`), run one claim loop per slot, up to `max_slots`
+- [ ] Re-fetch slots every heartbeat: start loops for new/enabled slots; a disabled slot finishes its current task, then stops
+- [ ] One `_base` clone per repository with a per-repository lock around fetch and `worktree add`; worktrees stay per task
+- [ ] Each run uses its slot's provider + model
+
+**Models (§32)**
+- [ ] A second `Agent` implementation for a cheap/free model (an Anthropic-compatible endpoint for Claude Code, another CLI agent, or a local model). Same `Run(ctx, Job)` interface, same worktree restriction
+- [ ] Record tokens and cost per run for every provider, so the console can compare them
+
+**API (owner unless noted, all mutations audited)**
+- [ ] `GET /machines`, `PATCH /machines/{id}` (max_slots)
+- [ ] `POST /slots`, `GET /slots`, `PATCH /slots/{id}` (roles, projects, provider, model, handles, enabled, machine), `DELETE /slots/{id}` (only when idle)
+- [ ] `PATCH /clients/{ref}` and `PATCH /projects/{ref}` accept `allowed_providers`
+- [ ] `PATCH /tasks/{id}` (complexity, model) while the task is not in flight
+- [ ] `GET /documents/{ref}`: front matter + body, read-only
+- [ ] Approvals are recorded as `decided_by = owner via web`
+
+**Web console**
+- [ ] Served by the control plane: one static page embedded in the binary, calling the API above with the owner token. No build step
+- [ ] **Requests**: send a request to the AI lead (project, workflow, title, description); see steps, tasks, documents, approvals
+- [ ] **Tasks**: status, stage, current / last slot, model, complexity, runs (summary, tokens, cost), unclaimable flag; cancel, retry, set complexity or model
+- [ ] **Approvals**: pending list with summary, diffstat and a link to the branch compare; approve, request changes (comment required), reject
+- [ ] **Agent slots**: create, edit, enable/disable, move between machines; see what each one is working on. Machines show skills and used/max slots
+- [ ] **Documents**: list, filter by project/type, read rendered Markdown with relations as links, trace and impact. **Read-only**: the console never writes knowledge; edits go through Git (§31)
+- [ ] Everything AI-written (summaries, documents, logs) is rendered as untrusted content: escaped, no raw HTML, no scripts
+- [ ] Polls every few seconds; server-sent events only if polling proves too slow
+
+**Security (prerequisite before exposing it)**
+- [ ] Per-machine tokens (M2.4 / Cross-cutting Security); the owner token never reaches a machine or a coding agent
+- [ ] Control plane reachable only over Tailscale/WireGuard or behind TLS
+
+**Done when:** one VPS runs three agent slots created from the browser (an architect slot on a strong model, two developer slots on a cheap one). A request sent from the browser produces a PRD you read and approve in the console; its tasks run in parallel on different slots, each visible with its slot and model; a client project's task is never claimed by a slot on a provider that client does not allow; and you approve the merges without touching the CLI.
 
 ---
 
@@ -332,4 +393,5 @@ Do these in order of real pain, not in list order.
 | M2 | Hermes + notifications *(deferred)* | **V2: run it all from your phone** |
 | M3.1–3.4 | Contracts, validation, workflows ✅ | **PRD → design → tasks pipeline with gates** |
 | M3.5–3.9 | Roles, graph, impact, hand-over ✅ | **V3: traceability + impact analysis** |
+| M4.1 | Web console & agent slots | Slots created in the browser run tasks in parallel on one VPS, within provider policy |
 | V4 | Factory | Multiple projects in parallel, within budget |

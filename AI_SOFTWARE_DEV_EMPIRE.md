@@ -54,12 +54,15 @@ The platform must follow these principles:
                          HUMAN
                     Laptop / Phone
                           │
-                 Natural Language
-                          │
-                          ▼
-                       HERMES
-                AI Interface / Operator
-                          │
+          ┌───────────────┴───────────────┐
+   Natural Language                    Browser
+          │                               │
+          ▼                               ▼
+       HERMES                        WEB CONSOLE
+ AI Interface / Operator      Status · Approvals · Slots
+          │                               │
+          └───────────────┬───────────────┘
+                          │  same controlled API
                           ▼
                  ┌──────────────────┐
                  │    AI DEV OS     │
@@ -71,9 +74,10 @@ The platform must follow these principles:
           Workflow      Approval     Scheduler
              │            │             │
              │            │             ▼
-             │            │        ┌──────────┐
-             │            │        │ WORKERS  │
-             │            │        └────┬─────┘
+             │            │      ┌─────────────┐
+             │            │      │ AGENT SLOTS │
+             │            │      │ on machines │
+             │            │      └──────┬──────┘
              │            │             │
              │            │       Isolated Workspace
              │            │             │
@@ -120,6 +124,27 @@ The interface should hide unnecessary implementation details from the human.
 
 The owner should not need to manually assign workers, create queues, construct prompts, or manage agent processes.
 
+The owner may set **policy** on agent slots (§27): which roles, projects, providers, and task complexity a slot may take. Policy limits what a slot may claim; it never assigns work. The scheduler always decides which slot runs which task, and there is no manual "assign task X to slot Y".
+
+## 4A. Web Console
+
+The web console is a second human interface next to Hermes (§5), for seeing and deciding rather than conversing.
+
+It lets the owner:
+
+* send a request to the AI lead and follow its workflow, tasks, and approvals
+* see every task's status, which agent slot holds it or last worked on it, the model used, and cost
+* approve, request changes, or reject pending approvals
+* manage agent slot policy (§27) and see what each machine and slot is doing
+* read documents, their relationships, traces, and impact
+
+Rules:
+
+* It is a client of the same controlled API as Hermes (§33). It never touches the database directly and has no powers the API does not grant the owner.
+* It is **read-only for knowledge**. Documents are edited through Git and the owner's editor (§20, §31), never through the console.
+* Everything AI-written that it displays (summaries, documents, logs) is untrusted content and must be rendered safely.
+* It is reachable only over a private network or TLS (§34).
+
 ---
 
 # 5. Hermes
@@ -162,8 +187,9 @@ It owns:
 * approval gates
 * approval requests
 * human decisions
-* workers
-* worker capabilities
+* machines and their capabilities
+* agent slots and their policy
+* allowed AI providers per client and project
 * agent runs
 * context resolution
 * policies
@@ -519,6 +545,14 @@ Repository-specific knowledge lives inside the repository itself (README, CLAUDE
 * A project never receives another client's knowledge.
 * A project without a client never receives any client knowledge.
 * Moving a project to a different client is an explicit, audited owner action.
+
+### AI providers
+
+Sending a task's code and knowledge to an AI provider shares it with that provider. The confidentiality boundary therefore covers providers too:
+
+* each client (and optionally each project, narrowing its client) has a list of **allowed AI providers**
+* client work defaults to trusted providers only; cheap or free providers must be allowed explicitly
+* an agent slot never claims a task whose project does not allow the slot's provider (§27, §32)
 
 ### Future use
 
@@ -1037,20 +1071,36 @@ Workers are execution environments.
 Mental model:
 
 ```text
-Machine
+Machine          a host (laptop, VPS, mini PC) running one worker service
    ↓
-Worker
+Agent Slot       an owner-configured slot; holds at most one task at a time
    ↓
 Task
    ↓
-Workspace
+Workspace        an isolated worktree per task
    ↓
-AI Agent
+Coding Agent     the AI process the slot runs (Claude Code, another CLI, a local model)
    ↓
 Code / Tests / Git
 ```
 
-Worker responsibilities:
+Terms:
+
+* A **machine** declares what it can run (its capabilities, §28) and how many slots it can host.
+* An **agent slot** is the unit of parallelism: a machine with four slots works on up to four tasks at once. Where this document says "worker" for the thing that claims and runs a task, it means an agent slot.
+* A **coding agent** is the AI process a slot starts for one task. It is not a persistent identity.
+
+Agent slot policy is owner-managed and optional:
+
+* roles it may take (§26)
+* projects it may serve
+* AI provider and model it uses (§32)
+* task complexity it handles (e.g. `low`, `high`)
+* enabled or disabled
+
+An empty policy means no restriction. Policy only limits what a slot may claim; the scheduler still decides which slot runs which task (§4). A task that no enabled slot is allowed to claim must be visible to the owner as unclaimable, with the reason, never silently stuck.
+
+Worker responsibilities (per agent slot):
 
 1. Register
 2. Report capabilities
@@ -1068,12 +1118,13 @@ Worker responsibilities:
 
 # 28. Worker Capabilities
 
-Workers advertise capabilities.
+Machines advertise capabilities: the toolchains they actually have. Capabilities are declared by the machine, not set by the owner, because the owner cannot give a machine a toolchain it lacks.
 
 Example:
 
 ```text
-worker: mac-mini-01
+machine: mac-mini-01
+max slots: 3
 
 capabilities:
   - go
@@ -1085,9 +1136,18 @@ resources:
   cpu
   memory
   disk
+
+slots:
+  architect-1   roles: architect, planner     model: strong
+  dev-1         roles: developer              model: cheap    handles: low
+  dev-2         roles: developer, reviewer    model: strong   handles: low, high
 ```
 
-The scheduler should assign tasks based on required capabilities.
+A slot may claim a task only when all of these hold:
+
+* the task's required capabilities are a subset of the machine's capabilities
+* the task's role, project, and complexity are allowed by the slot's policy (§27)
+* the slot's provider is allowed for the task's project (§11B)
 
 ---
 
@@ -1159,7 +1219,9 @@ projects
 repositories
 tasks
 workflows
-workers
+machines
+agent slots and their policy
+allowed AI providers
 agent runs
 approval gates
 approval decisions
@@ -1199,6 +1261,8 @@ contracts
 project documentation
 ```
 
+Knowledge changes only through Git. Interfaces such as the web console (§4A) and Hermes may read knowledge but never write it.
+
 ### Hermes Memory
 
 Only Hermes-specific operational/personal knowledge.
@@ -1231,11 +1295,24 @@ Model selection can eventually consider:
 * availability
 * context requirements
 
+### Model selection
+
+A run's provider and model are resolved in this order:
+
+```text
+task override  →  agent slot's model  →  machine default
+```
+
+* The planner tags each work item with a **complexity** (`low` or `high`). Slots declare which complexities they handle, so hard work reaches slots with strong models and easy work can run on cheap ones, without the owner assigning anything.
+* The owner may override a task's complexity or model while the task is not running.
+* A provider not allowed for the task's project (§11B) is never used, whatever the override.
+* Every agent run records the provider and model that actually ran, with tokens and cost.
+
 ---
 
 # 33. MCP / Platform API
 
-Hermes should interact with the Control Plane through a controlled interface.
+Hermes and the web console (§4A) should interact with the Control Plane through the same controlled interface.
 
 Example operations:
 
@@ -1251,8 +1328,11 @@ start_task
 cancel_task
 retry_task
 
-list_workers
-get_worker_status
+list_machines
+list_agent_slots
+update_agent_slot_policy
+
+get_document
 
 get_workflow_status
 get_agent_run
@@ -1337,8 +1417,9 @@ The owner should be able to see:
 Projects
 Tasks
 Workflows
-Workers
-Agents
+Machines
+Agent slots (current and last task)
+Unclaimable tasks and why
 Current activity
 Failures
 Retries
@@ -1439,6 +1520,7 @@ The system should notify the owner when:
 * approval is required
 * a task fails
 * a worker becomes unavailable
+* a task cannot be claimed by any agent slot
 * a workflow is blocked
 * an agent needs clarification
 * tests fail repeatedly
@@ -1571,9 +1653,11 @@ Goal:
 Add:
 
 ```text
-Multiple workers
+Multiple agent slots per machine
+Web console (§4A)
 Multiple AI models
-Model routing
+Model routing by complexity
+Provider policy per client
 Cost optimization
 Advanced scheduling
 Learning system
@@ -1669,7 +1753,7 @@ HUMAN
   │
   │ intent
   ▼
-HERMES
+HERMES / WEB CONSOLE
   │
   │ controlled commands
   ▼
@@ -1683,10 +1767,10 @@ AI DEV OS
   └── Audit
   │
   ▼
-WORKERS
+MACHINES → AGENT SLOTS
   │
   ▼
-AI AGENTS
+CODING AGENTS
   │
   ▼
 CODE / TESTS / DOCUMENTATION
