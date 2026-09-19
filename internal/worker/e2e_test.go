@@ -313,6 +313,10 @@ func TestClientsAndRepositories(t *testing.T) {
 	if len(runs) != 1 || !slices.Equal(runs[0].ContextFiles, want) {
 		t.Errorf("frontend context = %v, want %v", runs, want)
 	}
+	// The frontend agent can read the backend (the only other repo in its project).
+	if !strings.Contains(runs[0].Summary, "(sees 1 sibling repo(s))") {
+		t.Errorf("frontend run summary = %q, want it to see the backend", runs[0].Summary)
+	}
 	backendFiles := taskDetail(t, owner, b1.ID).Runs[0].ContextFiles
 	if !slices.Contains(backendFiles, "stacks/go/go.md") || slices.Contains(backendFiles, "stacks/node/node.md") {
 		t.Errorf("backend context = %v", backendFiles)

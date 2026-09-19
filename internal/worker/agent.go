@@ -138,6 +138,9 @@ func (Fake) Run(ctx context.Context, job Job) (Result, error) {
 		line := fmt.Sprintf("%s %s\n", time.Now().UTC().Format(time.RFC3339Nano), first)
 		err = appendFile(filepath.Join(job.Dir, "empire-fake-agent.txt"), line)
 		summary = "fake agent wrote: " + strings.TrimSpace(line)
+		if repos, _ := filepath.Glob(filepath.Join(job.Dir, ".empire", "repos", "*", ".git")); len(repos) > 0 {
+			summary += fmt.Sprintf(" (sees %d sibling repo(s))", len(repos))
+		}
 	default:
 		summary, err = fakeDocuments(job.Dir, j)
 	}

@@ -170,6 +170,27 @@ func (w *Worker) Step(ctx context.Context) (bool, error) {
 	return true, nil
 }
 
+// checkoutSiblings puts the default branch of the project's other repositories under
+// .empire/repos/<name> in the task directory, so the agent can read them (API contracts,
+// types) without leaving its directory. .empire/ is excluded from commits.
+// ponytail: only repositories this worker has cloned before; have the claim list them if that's not enough.
+func checkoutSiblings(ctx context.Context, projectDir, self, dir string) error {
+	bases, _ := filepath.Glob(filepath.Join(projectDir, "*", "_base"))
+	for _, base := range bases {
+		name := filepath.Base(filepath.Dir(base))
+		if name == self {
+			continue
+		}
+		if _, err := git(ctx, base, "fetch", "--prune", "origin"); err != nil {
+			log.Printf("%s: fetch failed, using last fetched state: %v", name, err)
+		}
+		if err := addWorktree(ctx, base, filepath.Join(dir, ".empire", "repos", name), "origin/HEAD", "--detach"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // errRework means the AI reviewer sent the task back to the developer.
 var errRework = errors.New("sent back for rework")
 
@@ -222,6 +243,9 @@ func (w *Worker) implement(ctx context.Context, cl api.Claim, base, dir string) 
 		return err
 	}
 	if err := os.WriteFile(filepath.Join(dir, contextFile), []byte(tc.Content), 0o644); err != nil {
+		return err
+	}
+	if err := checkoutSiblings(ctx, filepath.Dir(filepath.Dir(base)), repo.Name, dir); err != nil {
 		return err
 	}
 

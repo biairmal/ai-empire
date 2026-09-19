@@ -43,6 +43,8 @@ func developerPrompt(cl api.Claim) string {
 - Read %[1]s first: engineering rules, your role, and the approved requirements and design for this task.
 - Also follow the repository's own guidance (README, CLAUDE.md, AGENTS.md, CONTRIBUTING.md).
 - Work only inside the current directory.
+- The project's other repositories (e.g. the backend and its API contract) are checked out read-only
+  under .empire/repos/<name>. Read them instead of guessing interfaces; never edit them.
 - Implement the task completely, with tests where it makes sense.
 - Do not run git commands, commit, or push; the worker handles version control.
 - Do not edit %[1]s or anything under .empire/.
